@@ -116,13 +116,19 @@ final class MLXEngine: ChatEngine {
                         || sessionSystemPrompt != systemPrompt
                         || sessionKnownPriorCount != prior.count
                     if needsRebuild {
+                        var params = GenerateParameters(temperature: Float(temperature))
+                        // Safety cap: bound runaway generation. Small quantized reasoning
+                        // models (e.g. Gemma 4 12B 4-bit) can loop in their thinking phase
+                        // for thousands of tokens without closing it. Normal replies are far
+                        // shorter, so this only stops a true runaway from generating forever.
+                        params.maxTokens = 8192
                         session = ChatSession(
                             container,
                             instructions: systemPrompt,
                             history: prior.map {
                                 Chat.Message(role: $0.role == .user ? .user : .assistant, content: $0.text)
                             },
-                            generateParameters: GenerateParameters(temperature: Float(temperature)))
+                            generateParameters: params)
                         sessionConversationID = conversationID
                         sessionSystemPrompt = systemPrompt
                         sessionKnownPriorCount = prior.count
@@ -133,22 +139,26 @@ final class MLXEngine: ChatEngine {
                         throw EngineError.generationFailed("Chat session unavailable.")
                     }
 
-                    // Thinking toggle (Qwen3 family): `enable_thinking: false`
-                    // makes the chat template pre-close the think block, so the
-                    // model answers directly. Applied per turn via the template
-                    // context — no session rebuild needed.
+                    // Reasoning routing (Qwen3 / DeepSeek-R1 / Gemma 4). For toggleable
+                    // models `enable_thinking: false` makes the chat template pre-close the
+                    // reasoning span so the model answers directly — applied per turn via
+                    // the template context, no session rebuild needed.
                     let thinkingEnabled = UserDefaults.standard.object(forKey: Keys.thinkingEnabled)
                         as? Bool ?? Keys.Defaults.thinkingEnabled
-                    let thinkingActive = !model.supportsThinkingToggle || thinkingEnabled
-                    if model.supportsThinkingToggle {
-                        session.additionalContext = ["enable_thinking": thinkingEnabled]
+                    var filter = ThinkTagFilter()
+                    if let thinking = model.thinking {
+                        let active = !thinking.toggleable || thinkingEnabled
+                        if thinking.toggleable {
+                            session.additionalContext = ["enable_thinking": thinkingEnabled]
+                        }
+                        // With thinking off the template pre-closes the span, so the stream
+                        // is a plain answer — passthrough (the default filter) is correct.
+                        if active {
+                            filter = ThinkTagFilter(
+                                open: thinking.open, close: thinking.close,
+                                startsInside: thinking.startsInside, mayEmit: !thinking.startsInside)
+                        }
                     }
-
-                    var filter = ThinkTagFilter(
-                        // With thinking off the template already closed <think>,
-                        // so the stream does NOT start inside a think block.
-                        startsInsideThink: model.startsInsideThink && thinkingActive,
-                        mayEmitThinkTags: model.emitsThinkTags)
                     var tokensPerSecond: Double?
 
                     for try await event in session.streamDetails(to: pending.text) {

@@ -9,5 +9,11 @@
     <array>
         <string>/Models/</string>
     </array>
+    <!-- Sparkle auto-updater XPC services (sandboxed installer/downloader). -->
+    <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+    <array>
+        <string>org.mlxchat.MLXChat-spks</string>
+        <string>org.mlxchat.MLXChat-spki</string>
+    </array>
 </dict>
 </plist>

@@ -23,27 +23,43 @@ packages:
   SwiftMath:
     url: https://github.com/mgriebling/SwiftMath
     from: 1.7.3
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
 targets:
   MLXChat:
     type: application
     platform: macOS
     sources: [MLXChat]
+    # A real Info.plist (not GENERATE_INFOPLIST_FILE) is needed so we can add
+    # Sparkle's custom keys; the arbitrary `INFOPLIST_KEY_*` pass-through only
+    # supports Apple's allow-listed keys. XcodeGen fills the standard CFBundle keys.
+    info:
+      path: MLXChat/Support/Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSHumanReadableCopyright: ""
+        # Sparkle auto-update: the appcast is a GitHub Release asset on this repo
+        # (latest/download always resolves to the newest release). SUPublicEDKey is
+        # the app's public verification key — safe to commit.
+        SUFeedURL: "https://github.com/abayomipopoola/mlx-chat/releases/latest/download/appcast.xml"
+        SUPublicEDKey: "yzzKtSco8tZ2cWBQqqTCC0XGAnB9H2mJb6+U2gLHgrY="
     settings:
       base:
         PRODUCT_NAME: MLX Chat
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
-        MARKETING_VERSION: 1.0.0
+        MARKETING_VERSION: 1.0.1
         CURRENT_PROJECT_VERSION: 1
         SWIFT_VERSION: "5.0"
         CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: NO
         CODE_SIGN_ENTITLEMENTS: MLXChat/Support/MLXChat.entitlements
-        GENERATE_INFOPLIST_FILE: YES
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
       configs:
         # Release builds ad hoc by default, so anyone can build from source
         # without a developer account. To ship a NOTARIZED release, a
@@ -76,6 +92,8 @@ targets:
         product: Highlightr
       - package: SwiftMath
         product: SwiftMath
+      - package: Sparkle
+        product: Sparkle
   MLXChatTests:
     type: bundle.unit-test
     platform: macOS

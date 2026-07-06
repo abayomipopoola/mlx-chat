@@ -7,6 +7,7 @@ import SwiftUI
 /// White cards with hairline strokes.
 struct SettingsPage: View {
     @Environment(ChatController.self) private var chat
+    @Environment(UpdateController.self) private var updates
     /// Pops back to the chat (custom routing, no NavigationStack).
     var onBack: () -> Void = {}
     /// Pushes the Manage Models page.
@@ -21,10 +22,43 @@ struct SettingsPage: View {
     var body: some View {
         VStack(spacing: 0) {
             StudioPageHeader(title: "Settings", onBack: onBack)
+            if let version = updates.availableVersion {
+                updateBanner(version: version)
+            }
             settingsContent
         }
         .background(Color.detailBackground)
-        .onAppear(perform: refreshUsage)
+        .onAppear {
+            refreshUsage()
+            updates.checkInBackground()
+        }
+    }
+
+    /// Notifier shown above the settings when a newer version is on the appcast.
+    private func updateBanner(version: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(Color.brandGreen)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("MLX Chat \(version) is available")
+                    .font(Studio.body14Semibold)
+                Text("You're on \(updates.currentVersion) — the update installs in place.")
+                    .font(Studio.caption13)
+                    .foregroundStyle(Color.subtitleGray)
+            }
+            Spacer(minLength: 12)
+            Button("Update Now") { updates.checkForUpdates() }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.brandGreen)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.brandGreen.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.cardStroke).frame(height: 1)
+        }
     }
 
     private var settingsContent: some View {

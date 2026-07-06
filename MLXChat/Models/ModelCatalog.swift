@@ -15,19 +15,44 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     let category: Category
     let blurb: String
     let extraEOSTokens: Set<String>
-    /// Chat template pre-opens `<think>` in the generation prompt (Qwen3.5 family):
-    /// the stream starts inside a think block with no opening tag.
-    let startsInsideThink: Bool
-    /// Model may emit explicit `<think>…</think>` tags (Qwen3 family, R1 distills).
-    let emitsThinkTags: Bool
+    /// How the model expresses chain-of-thought reasoning in its stream, or `nil`
+    /// for a non-reasoning model. Drives both stream routing and the thinking toggle.
+    let thinking: ThinkingConfig?
 
     var hugginFaceURL: URL { URL(string: "https://huggingface.co/\(id)")! }
 
-    /// Thinking can be switched off via the Qwen3-family `/no_think` soft
-    /// switch. R1 distills think unconditionally, so they are NOT toggleable.
-    var supportsThinkingToggle: Bool {
-        displayName.hasPrefix("Qwen3") && (startsInsideThink || emitsThinkTags)
+    /// Reasoning can be switched off per turn via the model's `enable_thinking`
+    /// template kwarg (Qwen3 family, Gemma 4). R1 distills reason unconditionally.
+    var supportsThinkingToggle: Bool { thinking?.toggleable == true }
+}
+
+/// How a model emits chain-of-thought reasoning inline in its output stream.
+///
+/// The reasoning span is delimited by markers the model writes itself; these
+/// differ by family. Qwen3 and DeepSeek-R1 use `<think>…</think>`; Gemma 4 uses a
+/// harmony-style thought channel, `<|channel>thought … <channel|>`. All reach the
+/// app as text because MLX decodes the stream with `skipSpecialTokens: false`.
+struct ThinkingConfig: Hashable, Codable {
+    /// Marker that opens the reasoning span (ignored when `startsInside`).
+    let open: String
+    /// Marker that closes it; the visible answer follows.
+    let close: String
+    /// The chat template pre-opens the span, so the stream begins already inside
+    /// reasoning with no opening marker present (Qwen3.5 with thinking on).
+    let startsInside: Bool
+    /// Reasoning can be disabled per turn via the `enable_thinking` template kwarg.
+    let toggleable: Bool
+
+    /// Inline `<think>…</think>` tags (Qwen3 family, DeepSeek-R1 distills).
+    static func thinkTags(startsInside: Bool = false, toggleable: Bool) -> ThinkingConfig {
+        ThinkingConfig(open: "<think>", close: "</think>",
+                       startsInside: startsInside, toggleable: toggleable)
     }
+
+    /// Gemma 4 harmony-style thought channel: `<|channel>thought … <channel|>`.
+    static let gemmaChannel = ThinkingConfig(
+        open: "<|channel>thought", close: "<channel|>",
+        startsInside: false, toggleable: true)
 }
 
 /// A curated group of related models, shown as one tappable card in Manage Models.
@@ -114,62 +139,62 @@ enum ModelCatalog {
             id: "mlx-community/Qwen3.5-9B-4bit", displayName: "Qwen3.5 9B",
             sizeGB: 5.95, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
             blurb: "Latest Qwen3.5. Excellent all-round quality on Apple Silicon.",
-            extraEOSTokens: ["<|im_end|>"], startsInsideThink: true, emitsThinkTags: true),
+            extraEOSTokens: ["<|im_end|>"], thinking: .thinkTags(startsInside: true, toggleable: true)),
         CatalogModel(
             id: "mlx-community/Qwen3.5-2B-4bit", displayName: "Qwen3.5 2B",
             sizeGB: 1.72, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
             blurb: "Small, fast Qwen3.5 for quick tasks.",
-            extraEOSTokens: ["<|im_end|>"], startsInsideThink: true, emitsThinkTags: true),
+            extraEOSTokens: ["<|im_end|>"], thinking: .thinkTags(startsInside: true, toggleable: true)),
         CatalogModel(
             id: "mlx-community/Qwen3-4B-4bit", displayName: "Qwen3 4B",
             sizeGB: 2.26, ctxTokens: 40_960, quantLabel: "4-bit", category: .general,
             blurb: "Solid general model with thinking mode.",
-            extraEOSTokens: ["<|im_end|>"], startsInsideThink: false, emitsThinkTags: true),
+            extraEOSTokens: ["<|im_end|>"], thinking: .thinkTags(toggleable: true)),
         CatalogModel(
             id: "mlx-community/Qwen3-0.6B-4bit", displayName: "Qwen3 0.6B",
             sizeGB: 0.34, ctxTokens: 40_960, quantLabel: "4-bit", category: .general,
             blurb: "Tiny model for instant smoke tests.",
-            extraEOSTokens: ["<|im_end|>"], startsInsideThink: false, emitsThinkTags: true),
+            extraEOSTokens: ["<|im_end|>"], thinking: .thinkTags(toggleable: true)),
         CatalogModel(
             id: "mlx-community/Llama-3.2-3B-Instruct-4bit", displayName: "Llama 3.2 3B",
             sizeGB: 1.81, ctxTokens: 131_072, quantLabel: "4-bit", category: .general,
             blurb: "Meta's compact instruct model.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: nil),
         CatalogModel(
             id: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", displayName: "Llama 3.1 8B",
             sizeGB: 4.52, ctxTokens: 131_072, quantLabel: "4-bit", category: .general,
             blurb: "Meta's classic 8B all-rounder.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: nil),
         CatalogModel(
             id: "mlx-community/phi-4-4bit", displayName: "Phi-4 14B",
             sizeGB: 8.25, ctxTokens: 16_384, quantLabel: "4-bit", category: .reasoning,
             blurb: "Microsoft's reasoning-focused 14B.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: nil),
         CatalogModel(
             id: "mlx-community/gemma-4-12B-it-4bit", displayName: "Gemma 4 12B",
             sizeGB: 6.74, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
             blurb: "Google's latest generation. Strong chat and reasoning with 256K context.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: .gemmaChannel),
         CatalogModel(
             id: "mlx-community/gemma-4-12B-it-qat-4bit", displayName: "Gemma 4 12B QAT",
             sizeGB: 10.99, ctxTokens: 262_144, quantLabel: "QAT 4-bit", category: .general,
             blurb: "Quantization-aware trained: closer to full precision at 4-bit.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: .gemmaChannel),
         CatalogModel(
             id: "mlx-community/gemma-3-1b-it-4bit", displayName: "Gemma 3 1B",
             sizeGB: 0.73, ctxTokens: 32_768, quantLabel: "4-bit", category: .general,
             blurb: "Google's lightweight text model.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: nil),
         CatalogModel(
             id: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit", displayName: "Qwen2.5 Coder 7B",
             sizeGB: 4.28, ctxTokens: 32_768, quantLabel: "4-bit", category: .coding,
             blurb: "Strong local coding assistant.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false),
+            extraEOSTokens: [], thinking: nil),
         CatalogModel(
             id: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit", displayName: "DeepSeek R1 Qwen 7B",
             sizeGB: 4.28, ctxTokens: 131_072, quantLabel: "4-bit", category: .reasoning,
             blurb: "Reasoning distill; shows its thinking.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: true),
+            extraEOSTokens: [], thinking: .thinkTags(toggleable: false)),
     ]
 
     static func model(for id: String) -> CatalogModel? {
@@ -183,6 +208,6 @@ enum ModelCatalog {
             displayName: repoID.split(separator: "/").last.map(String.init) ?? repoID,
             sizeGB: 0, ctxTokens: 8_192, quantLabel: "MLX", category: .imported,
             blurb: "Imported from HuggingFace.",
-            extraEOSTokens: [], startsInsideThink: false, emitsThinkTags: false)
+            extraEOSTokens: [], thinking: nil)
     }
 }

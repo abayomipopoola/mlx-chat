@@ -16,3 +16,6 @@ xcuserdata/
 # Packaging output
 dist/
 *.dmg
+
+# XcodeGen-generated Info.plist
+MLXChat/Support/Info.plist

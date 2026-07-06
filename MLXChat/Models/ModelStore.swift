@@ -118,21 +118,27 @@ final class ModelStore {
 
     func download(_ id: String) {
         guard downloadTasks[id] == nil else { return }
+        // Downloads land in the plain `~/Models/<org>/<name>` layout, which
+        // `localModelDirectory` resolves first — so the load path finds them offline
+        // and never falls back to the (broken) library `.id` downloader. See
+        // `SnapshotDownloader` for why we don't use the vendored `downloadSnapshot`.
+        guard let destination = Self.plainDirectory(for: id) else {
+            lastError = "Invalid model id: \(id)"
+            return
+        }
         lastError = nil
         downloadProgress[id] = 0
         let task = Task { [weak self] in
             do {
-                let downloader = HubDownloader(Self.hubClient)
-                _ = try await downloader.download(
-                    id: id, revision: "main",
-                    matching: Self.downloadPatterns, useLatest: false,
-                    progressHandler: { progress in
-                        Task { @MainActor [weak self] in
-                            self?.downloadProgress[id] = progress.fractionCompleted
+                try await SnapshotDownloader.download(
+                    repoID: id, destination: destination,
+                    onProgress: { fraction in
+                        Task { @MainActor in
+                            self?.downloadProgress[id] = fraction
                         }
                     })
             } catch is CancellationError {
-                // Cancelled: partial blobs are resumable; leave them.
+                // Cancelled: the `.partial` staging dir is left for resume.
             } catch {
                 await MainActor.run { [weak self] in
                     self?.lastError = "Download failed: \(error.localizedDescription)"
@@ -162,10 +168,13 @@ final class ModelStore {
         downloadProgress[id] = nil
     }
 
-    /// Removes BOTH layouts for the model.
+    /// Removes BOTH layouts for the model, plus any interrupted `.partial` staging.
     func delete(_ id: String) {
         if let plain = Self.plainDirectory(for: id) {
             try? FileManager.default.removeItem(at: plain)
+            let staging = plain.deletingLastPathComponent()
+                .appendingPathComponent(plain.lastPathComponent + ".partial", isDirectory: true)
+            try? FileManager.default.removeItem(at: staging)
         }
         if let hub = Self.hubRepoDirectory(for: id) {
             try? FileManager.default.removeItem(at: hub)

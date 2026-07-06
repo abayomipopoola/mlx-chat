@@ -31,8 +31,11 @@ private struct DownloadItemRow: View {
 
     private var caption: String {
         let percent = "\(Int(fraction * 100))%"
+        // Show downloaded / total so a big model still reads as "alive" while it
+        // is below 1% (a 6.7 GB model spends its first minute rounding to 0%).
         if let size = model?.sizeGB, size > 0 {
-            return "\(percent) • \(String(format: "%.1f", size)) GB"
+            let done = String(format: "%.1f", fraction * size)
+            return "\(percent) • \(done) / \(String(format: "%.1f", size)) GB"
         }
         return percent
     }

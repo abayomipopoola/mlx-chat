@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Build output (CLI builds use .build/dd as derived data)
+.build/
+build/
+DerivedData/
+
+# XcodeGen output — regenerate with `xcodegen generate`
+MLXChat.xcodeproj/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
+# Packaging output
+dist/
+*.dmg

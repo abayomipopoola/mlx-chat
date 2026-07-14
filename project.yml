@@ -47,13 +47,14 @@ targets:
         # the app's public verification key — safe to commit.
         SUFeedURL: "https://github.com/abayomipopoola/mlx-chat/releases/latest/download/appcast.xml"
         SUPublicEDKey: "yzzKtSco8tZ2cWBQqqTCC0XGAnB9H2mJb6+U2gLHgrY="
+        SUEnableInstallerLauncherService: true
     settings:
       base:
         PRODUCT_NAME: MLX Chat
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
         MARKETING_VERSION: 1.0.2
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 3
         SWIFT_VERSION: "5.0"
         CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: NO

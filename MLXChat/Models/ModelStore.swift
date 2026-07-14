@@ -39,7 +39,11 @@ final class ModelStore {
     init() {
         if let data = UserDefaults.standard.data(forKey: Keys.customModels),
            let models = try? JSONDecoder().decode([CatalogModel].self, from: data) {
-            customModels = models
+            let upgraded = models.map(ModelCatalog.applyingKnownCapabilities)
+            customModels = upgraded
+            if upgraded != models, let encoded = try? JSONEncoder().encode(upgraded) {
+                UserDefaults.standard.set(encoded, forKey: Keys.customModels)
+            }
         } else {
             customModels = []
         }

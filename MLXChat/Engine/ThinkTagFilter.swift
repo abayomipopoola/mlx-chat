@@ -3,8 +3,9 @@ import Foundation
 /// Routes streamed model text into thinking vs. visible content.
 ///
 /// The reasoning span is delimited by a pair of markers the model writes inline.
-/// The markers are model-specific (see `ThinkingConfig`): Qwen3 / R1 use
-/// `<think>…</think>`; Gemma 4 uses `<|channel>thought … <channel|>`. Three shapes
+/// The markers are model-specific (see `ThinkingConfig`): Qwen3 / Ternary
+/// Bonsai / R1 use `<think>…</think>`; Gemma 4 uses
+/// `<|channel>thought … <channel|>`. Three shapes
 /// are handled:
 /// - `startsInside`: the chat template pre-opened the span (Qwen3.5 with thinking
 ///   on) — the stream begins mid-reasoning with no opening marker, only a close.

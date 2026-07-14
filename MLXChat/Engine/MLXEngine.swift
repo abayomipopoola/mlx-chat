@@ -139,7 +139,7 @@ final class MLXEngine: ChatEngine {
                         throw EngineError.generationFailed("Chat session unavailable.")
                     }
 
-                    // Reasoning routing (Qwen3 / DeepSeek-R1 / Gemma 4). For toggleable
+                    // Reasoning routing (Qwen3 / Ternary Bonsai / DeepSeek-R1 / Gemma 4). For toggleable
                     // models `enable_thinking: false` makes the chat template pre-close the
                     // reasoning span so the model answers directly — applied per turn via
                     // the template context, no session rebuild needed.

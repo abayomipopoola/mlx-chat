@@ -19,4 +19,34 @@ import Testing
             #expect(model.ctxTokens > 0, "\(model.id) has no context window")
         }
     }
+
+    @Test func ternaryBonsaiImportedModelSupportsThinkingToggle() {
+        let model = ModelCatalog.importedModel(
+            repoID: "prism-ml/Ternary-Bonsai-27B-mlx-2bit")
+
+        #expect(model.supportsThinkingToggle)
+        #expect(model.thinking?.open == "<think>")
+        #expect(model.thinking?.close == "</think>")
+        #expect(model.thinking?.startsInside == true)
+        #expect(model.ctxTokens == 262_144)
+        #expect(model.extraEOSTokens.contains("<|im_end|>"))
+    }
+
+    @Test func ternaryBonsaiCapabilitiesUpgradeExistingImport() {
+        let staleImport = CatalogModel(
+            id: "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+            displayName: "Ternary-Bonsai-27B-mlx-2bit",
+            sizeGB: 0,
+            ctxTokens: 8_192,
+            quantLabel: "MLX",
+            category: .imported,
+            blurb: "Imported from HuggingFace.",
+            extraEOSTokens: [],
+            thinking: nil)
+
+        let upgraded = ModelCatalog.applyingKnownCapabilities(to: staleImport)
+
+        #expect(upgraded.supportsThinkingToggle)
+        #expect(upgraded.thinking?.startsInside == true)
+    }
 }

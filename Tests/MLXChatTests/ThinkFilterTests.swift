@@ -10,7 +10,8 @@ import Testing
         _ chunks: [String], startsInsideThink: Bool, mayEmitThinkTags: Bool
     ) -> (thinking: String, content: String, reclassified: Bool) {
         var filter = ThinkTagFilter(
-            startsInsideThink: startsInsideThink, mayEmitThinkTags: mayEmitThinkTags)
+            open: "<think>", close: "</think>",
+            startsInside: startsInsideThink, mayEmit: mayEmitThinkTags)
         var thinking = ""
         var content = ""
         for chunk in chunks {
@@ -48,7 +49,8 @@ import Testing
     }
 
     @Test func neverClosedThinkIsReclassifiedAsContent() {
-        var filter = ThinkTagFilter(startsInsideThink: true, mayEmitThinkTags: true)
+        var filter = ThinkTagFilter(
+            open: "<think>", close: "</think>", startsInside: true, mayEmit: true)
         _ = filter.consume("only reasoning text")
         let end = filter.finish()
         #expect(end.reclassified)

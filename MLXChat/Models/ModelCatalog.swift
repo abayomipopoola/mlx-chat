@@ -22,15 +22,17 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     var hugginFaceURL: URL { URL(string: "https://huggingface.co/\(id)")! }
 
     /// Reasoning can be switched off per turn via the model's `enable_thinking`
-    /// template kwarg (Qwen3 family, Gemma 4). R1 distills reason unconditionally.
+    /// template kwarg (Qwen3 family, Ternary Bonsai, Gemma 4). R1 distills
+    /// reason unconditionally.
     var supportsThinkingToggle: Bool { thinking?.toggleable == true }
 }
 
 /// How a model emits chain-of-thought reasoning inline in its output stream.
 ///
 /// The reasoning span is delimited by markers the model writes itself; these
-/// differ by family. Qwen3 and DeepSeek-R1 use `<think>…</think>`; Gemma 4 uses a
-/// harmony-style thought channel, `<|channel>thought … <channel|>`. All reach the
+/// differ by family. Qwen3, Ternary Bonsai, and DeepSeek-R1 use
+/// `<think>…</think>`; Gemma 4 uses a harmony-style thought channel,
+/// `<|channel>thought … <channel|>`. All reach the
 /// app as text because MLX decodes the stream with `skipSpecialTokens: false`.
 struct ThinkingConfig: Hashable, Codable {
     /// Marker that opens the reasoning span (ignored when `startsInside`).
@@ -201,13 +203,32 @@ enum ModelCatalog {
         models.first { $0.id == id }
     }
 
-    /// Fallback entry shape for user-imported repos.
+    /// Fallback entry shape for user-imported repos. Known imported models are
+    /// enriched with capabilities that cannot be inferred from the repo id alone.
     static func importedModel(repoID: String) -> CatalogModel {
-        CatalogModel(
+        applyingKnownCapabilities(to: CatalogModel(
             id: repoID,
             displayName: repoID.split(separator: "/").last.map(String.init) ?? repoID,
             sizeGB: 0, ctxTokens: 8_192, quantLabel: "MLX", category: .imported,
             blurb: "Imported from HuggingFace.",
-            extraEOSTokens: [], thinking: nil)
+            extraEOSTokens: [], thinking: nil))
+    }
+
+    /// Upgrades persisted imported entries when support for one of their model
+    /// families is added after the model was originally imported.
+    static func applyingKnownCapabilities(to model: CatalogModel) -> CatalogModel {
+        guard model.id.lowercased() == "prism-ml/ternary-bonsai-27b-mlx-2bit" else {
+            return model
+        }
+        return CatalogModel(
+            id: model.id,
+            displayName: model.displayName,
+            sizeGB: model.sizeGB,
+            ctxTokens: 262_144,
+            quantLabel: model.quantLabel,
+            category: model.category,
+            blurb: model.blurb,
+            extraEOSTokens: model.extraEOSTokens.union(["<|im_end|>"]),
+            thinking: .thinkTags(startsInside: true, toggleable: true))
     }
 }

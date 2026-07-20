@@ -8,12 +8,11 @@ struct ChatScreen: View {
     let conversation: Conversation?
     /// Creates and selects a conversation lazily on first send.
     let onCreateConversation: () -> Conversation?
-    /// Pushes the in-frame Models page (picker lives in-content, not in a toolbar).
-    let onManageModels: () -> Void
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
+    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
 
     private var messages: [ChatMessage] {
         conversation?.orderedMessages ?? []
@@ -31,8 +30,8 @@ struct ChatScreen: View {
                 transcript
             }
             EngineReadinessNotice(selectedModelID: chat.selectedModelID)
-            ComposerView(draft: $draft, focused: $composerFocused) { text in
-                send(text)
+            ComposerView(draft: $draft, focused: $composerFocused) { text, attachments in
+                send(text, attachments: attachments)
             }
         }
         .background(Color.detailBackground)
@@ -40,14 +39,33 @@ struct ChatScreen: View {
             // Fixed header: opaque, so the transcript scrolls under it
             // instead of sliding past the model picker.
             HStack(spacing: 8) {
+                // With the sidebar collapsed the traffic lights sit over the
+                // header's leading edge; the extra padding keeps the toggle
+                // clear. When the sidebar is open, the toggle and the settings
+                // gear live in the sidebar's top band instead.
+                if sidebarCollapsed {
+                    Button {
+                        sidebarCollapsed.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, height: 34)
+                            .glassEffect(.regular.interactive(), in: Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show Sidebar (⌃⌘S)")
+                }
                 Spacer()
-                ModelPickerMenu(onManageModels: onManageModels)
+                ModelPickerMenu()
                 if chat.selectedModelSupportsThinking {
                     ThinkingToggle()
                 }
                 PromptPresetMenu()
             }
-            .padding(.horizontal, 20)
+            .padding(.leading, sidebarCollapsed ? Studio.trafficLightClearance : 20)
+            .padding(.trailing, 20)
             .padding(.top, 16)
             .padding(.bottom, 4)
             .frame(maxWidth: .infinity)
@@ -107,6 +125,7 @@ struct ChatScreen: View {
                 .padding(.top, 24)
                 .animation(.easeOut(duration: 0.25), value: messages.count)
             }
+            .accessibilityIdentifier("transcriptScrollView")
             .defaultScrollAnchor(.bottom)
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentOffset.y + geometry.containerSize.height
@@ -147,10 +166,14 @@ struct ChatScreen: View {
         }
     }
 
-    private func send(_ text: String) {
+    private func send(_ text: String, attachments: ComposerAttachments = ComposerAttachments()) {
         guard !chat.isStreaming else { return }
         guard let target = conversation ?? onCreateConversation() else { return }
-        chat.send(text, in: target)
+        chat.send(
+            text,
+            in: target,
+            image: attachments.imageData,
+            attachment: attachments.attachment)
     }
 }
 
@@ -203,7 +226,7 @@ private struct ThinkingToggle: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(enabled ? Color.iconPurple : .secondary)
                 .frame(width: 34, height: 34)
-                .background(Circle().fill(Color.sidebarBackground))
+                .glassEffect(.regular.interactive(), in: Circle())
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)

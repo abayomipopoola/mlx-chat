@@ -50,6 +50,10 @@ final class EngineRuntime {
             if let message = AppleIntelligenceEngine.availabilityMessage() {
                 throw EngineError.unavailable(message)
             }
+            // Switching to Apple Intelligence releases any resident MLX weights
+            // — except mid-generation, where the stream still needs them (the
+            // idle auto-unload or a later resolve reclaims them after).
+            if mlxEngine != nil, !isGenerating { unloadCurrent() }
             return appleEngine
         }
 
@@ -70,6 +74,13 @@ final class EngineRuntime {
                 state = .empty
                 throw error
             }
+        }
+
+        // Reject configs this build can't run (unknown architecture or
+        // out-of-range affine quant) before mlx C traps on quantize.
+        if let reason = ModelSupport.unsupportedReason(modelID: id) {
+            state = .empty
+            throw EngineError.unavailable("\(catalogModel.displayName) can't run in this build: \(reason).")
         }
 
         let engine = mlxEngine ?? MLXEngine(model: catalogModel)
@@ -104,6 +115,12 @@ final class EngineRuntime {
     func endGenerating() {
         if case .generating(let id) = state { state = .ready(id: id) }
         lastUsedAt = .now
+    }
+
+    /// True while an MLX model owns the in-RAM slot for an active stream.
+    private var isGenerating: Bool {
+        if case .generating = state { return true }
+        return false
     }
 
     func unloadCurrent() {

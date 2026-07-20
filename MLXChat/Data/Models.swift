@@ -44,15 +44,32 @@ final class ChatMessage {
     var tokensPerSecond: Double?
     /// Engine id that produced an assistant message.
     var modelID: String?
+    /// Downscaled JPEG payload for a vision attachment (user messages only).
+    @Attribute(.externalStorage) var imageData: Data?
+    /// Display name of an attached file (user messages only).
+    var attachmentName: String?
+    /// Extracted text of an attached file, length-capped at extraction time.
+    var attachmentText: String?
     var conversation: Conversation?
 
-    init(role: String, content: String, sortIndex: Int, modelID: String? = nil) {
+    init(
+        role: String,
+        content: String,
+        sortIndex: Int,
+        modelID: String? = nil,
+        imageData: Data? = nil,
+        attachmentName: String? = nil,
+        attachmentText: String? = nil
+    ) {
         self.id = UUID()
         self.role = role
         self.content = content
         self.createdAt = .now
         self.sortIndex = sortIndex
         self.modelID = modelID
+        self.imageData = imageData
+        self.attachmentName = attachmentName
+        self.attachmentText = attachmentText
     }
 
     var isUser: Bool { role == "user" }

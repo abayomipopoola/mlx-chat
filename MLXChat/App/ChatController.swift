@@ -19,7 +19,8 @@ final class ChatController {
         let saved = UserDefaults.standard.string(forKey: Keys.selectedModelID)
             ?? Keys.Defaults.selectedModelID
         guard saved == appleIntelligenceEngineID
-            || ModelStore.localModelDirectory(for: saved) != nil
+            || (ModelStore.localModelDirectory(for: saved) != nil
+                && ModelSupport.unsupportedReason(modelID: saved) == nil)
         else { return appleIntelligenceEngineID }
         return saved
     }() {
@@ -63,17 +64,33 @@ final class ChatController {
         modelStore.model(for: selectedModelID)?.supportsThinkingToggle == true
     }
 
+    /// Whether the composer shows the attachment control for the selected model.
+    var selectedModelSupportsVision: Bool {
+        modelStore.model(for: selectedModelID)?.supportsVision == true
+    }
+
     var canRetry: Bool { retryConversation != nil }
 
     // MARK: - Sending
 
-    func send(_ text: String, in conversation: Conversation) {
+    func send(
+        _ text: String,
+        in conversation: Conversation,
+        image: Data? = nil,
+        attachment: (name: String, text: String)? = nil
+    ) {
         guard !isStreaming, let store = conversationStore else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty || image != nil || attachment != nil else { return }
         errorBanner = nil
         retryConversation = nil
-        store.appendMessage(role: "user", content: trimmed, to: conversation)
+        store.appendMessage(
+            role: "user",
+            content: trimmed,
+            to: conversation,
+            imageData: image,
+            attachmentName: attachment?.name,
+            attachmentText: attachment?.text)
         startAssistantTurn(in: conversation)
     }
 
@@ -116,6 +133,10 @@ final class ChatController {
         let id = selectedModelID
         let name = selectedModelDisplayName
         if id == appleIntelligenceEngineID {
+            // Release any resident MLX weights right away — previously they
+            // stayed in RAM until the idle auto-unload fired. Never yank
+            // mid-stream: the in-flight generation still needs them.
+            if !isStreaming { runtime.unloadCurrent() }
             showSwitchToast("Switched to \(name)")
             return
         }
@@ -176,10 +197,31 @@ final class ChatController {
         let temperature = defaults.object(forKey: Keys.personalizationTemperature) as? Double
             ?? Keys.Defaults.personalizationTemperature
 
-        let history = conversation.orderedMessages
+        let model = modelStore.model(for: selectedModelID)
+        let supportsVision = model?.supportsVision == true
+        let prior = conversation.orderedMessages
             .filter { $0.id != assistant.id }
             .filter { !($0.role == "assistant" && $0.content.isEmpty) }
-            .map { EngineMessage(role: $0.isUser ? .user : .assistant, text: $0.content) }
+        let pendingUserID = prior.last(where: { $0.isUser })?.id
+        let history: [EngineMessage] = prior.map { message in
+            if message.isUser {
+                let text = PromptBuilder.userText(
+                    content: message.content,
+                    attachmentName: message.attachmentName,
+                    attachmentText: message.attachmentText)
+                // Images only on the final pending user turn, and only for VLMs.
+                let images: [Data]
+                if supportsVision,
+                   message.id == pendingUserID,
+                   let data = message.imageData {
+                    images = [data]
+                } else {
+                    images = []
+                }
+                return EngineMessage(role: .user, text: text, images: images)
+            }
+            return EngineMessage(role: .assistant, text: message.content)
+        }
         let modelID = selectedModelID
         let conversationID = conversation.id
 

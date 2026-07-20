@@ -56,7 +56,6 @@ struct WelcomeView: View {
     private struct ChipButton: View {
         let chip: Chip
         let action: () -> Void
-        @State private var hovering = false
 
         var body: some View {
             Button(action: action) {
@@ -70,13 +69,10 @@ struct WelcomeView: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(hovering ? Color.fieldFill : Color.bubbleFill))
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
             .buttonStyle(.plain)
-            .onHover { hovering = $0 }
         }
     }
 }

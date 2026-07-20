@@ -18,6 +18,47 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     /// How the model expresses chain-of-thought reasoning in its stream, or `nil`
     /// for a non-reasoning model. Drives both stream routing and the thinking toggle.
     let thinking: ThinkingConfig?
+    /// True when the model can accept image inputs (VLM). Persisted; legacy
+    /// UserDefaults entries without the key decode as `false`.
+    let supportsVision: Bool
+
+    init(
+        id: String,
+        displayName: String,
+        sizeGB: Double,
+        ctxTokens: Int,
+        quantLabel: String,
+        category: Category,
+        blurb: String,
+        extraEOSTokens: Set<String>,
+        thinking: ThinkingConfig?,
+        supportsVision: Bool = false
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.sizeGB = sizeGB
+        self.ctxTokens = ctxTokens
+        self.quantLabel = quantLabel
+        self.category = category
+        self.blurb = blurb
+        self.extraEOSTokens = extraEOSTokens
+        self.thinking = thinking
+        self.supportsVision = supportsVision
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        sizeGB = try c.decode(Double.self, forKey: .sizeGB)
+        ctxTokens = try c.decode(Int.self, forKey: .ctxTokens)
+        quantLabel = try c.decode(String.self, forKey: .quantLabel)
+        category = try c.decode(Category.self, forKey: .category)
+        blurb = try c.decode(String.self, forKey: .blurb)
+        extraEOSTokens = try c.decode(Set<String>.self, forKey: .extraEOSTokens)
+        thinking = try c.decodeIfPresent(ThinkingConfig.self, forKey: .thinking)
+        supportsVision = try c.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
+    }
 
     var hugginFaceURL: URL { URL(string: "https://huggingface.co/\(id)")! }
 
@@ -65,6 +106,7 @@ struct ModelFamily: Identifiable {
         case coding = "Coding"
         case reasoning = "Reasoning"
         case recommended = "Recommended"
+        case vision = "Vision"
     }
 
     let id: String
@@ -84,7 +126,7 @@ enum ModelCatalog {
         ModelFamily(
             id: "gemma4", name: "Gemma 4", icon: "bubble.left.and.bubble.right",
             blurb: "The latest generation of open models from Google. Optimized for multi-turn chat and advanced reasoning, with 256K context.",
-            badges: [.new, .recommended]),
+            badges: [.new, .recommended, .vision]),
         ModelFamily(
             id: "qwen3", name: "Qwen3", icon: "message",
             blurb: "Previous Qwen generation with thinking mode. Great quality per gigabyte.",
@@ -106,6 +148,10 @@ enum ModelCatalog {
             blurb: "Code-specialized Qwen models for local development.",
             badges: [.coding]),
         ModelFamily(
+            id: "qwen25vl", name: "Qwen2.5 VL", icon: "eye",
+            blurb: "Vision-language models that can see images and answer about them.",
+            badges: [.new, .vision]),
+        ModelFamily(
             id: "deepseek", name: "DeepSeek R1", icon: "brain.head.profile",
             blurb: "Reasoning distills that show their thinking step by step.",
             badges: [.thinking, .reasoning]),
@@ -125,6 +171,7 @@ enum ModelCatalog {
         let name = model.displayName
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
         if name.hasPrefix("Qwen3") { return "qwen3" }
+        if name.hasPrefix("Qwen2.5 VL") { return "qwen25vl" }
         if name.hasPrefix("Qwen2.5 Coder") { return "coder" }
         if name.hasPrefix("Llama") { return "llama" }
         if name.hasPrefix("Phi") { return "phi" }
@@ -176,12 +223,12 @@ enum ModelCatalog {
             id: "mlx-community/gemma-4-12B-it-4bit", displayName: "Gemma 4 12B",
             sizeGB: 6.74, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
             blurb: "Google's latest generation. Strong chat and reasoning with 256K context.",
-            extraEOSTokens: [], thinking: .gemmaChannel),
+            extraEOSTokens: [], thinking: .gemmaChannel, supportsVision: true),
         CatalogModel(
             id: "mlx-community/gemma-4-12B-it-qat-4bit", displayName: "Gemma 4 12B QAT",
             sizeGB: 10.99, ctxTokens: 262_144, quantLabel: "QAT 4-bit", category: .general,
             blurb: "Quantization-aware trained: closer to full precision at 4-bit.",
-            extraEOSTokens: [], thinking: .gemmaChannel),
+            extraEOSTokens: [], thinking: .gemmaChannel, supportsVision: true),
         CatalogModel(
             id: "mlx-community/gemma-3-1b-it-4bit", displayName: "Gemma 3 1B",
             sizeGB: 0.73, ctxTokens: 32_768, quantLabel: "4-bit", category: .general,
@@ -192,6 +239,12 @@ enum ModelCatalog {
             sizeGB: 4.28, ctxTokens: 32_768, quantLabel: "4-bit", category: .coding,
             blurb: "Strong local coding assistant.",
             extraEOSTokens: [], thinking: nil),
+        CatalogModel(
+            id: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", displayName: "Qwen2.5 VL 7B",
+            sizeGB: 5.25, ctxTokens: 128_000, quantLabel: "4-bit", category: .general,
+            blurb: "Vision-language model that can answer about images.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"], thinking: nil,
+            supportsVision: true),
         CatalogModel(
             id: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit", displayName: "DeepSeek R1 Qwen 7B",
             sizeGB: 4.28, ctxTokens: 131_072, quantLabel: "4-bit", category: .reasoning,
@@ -205,13 +258,14 @@ enum ModelCatalog {
 
     /// Fallback entry shape for user-imported repos. Known imported models are
     /// enriched with capabilities that cannot be inferred from the repo id alone.
-    static func importedModel(repoID: String) -> CatalogModel {
+    static func importedModel(repoID: String, supportsVision: Bool = false) -> CatalogModel {
         applyingKnownCapabilities(to: CatalogModel(
             id: repoID,
             displayName: repoID.split(separator: "/").last.map(String.init) ?? repoID,
             sizeGB: 0, ctxTokens: 8_192, quantLabel: "MLX", category: .imported,
             blurb: "Imported from HuggingFace.",
-            extraEOSTokens: [], thinking: nil))
+            extraEOSTokens: [], thinking: nil,
+            supportsVision: supportsVision))
     }
 
     /// Upgrades persisted imported entries when support for one of their model
@@ -229,6 +283,7 @@ enum ModelCatalog {
             category: model.category,
             blurb: model.blurb,
             extraEOSTokens: model.extraEOSTokens.union(["<|im_end|>"]),
-            thinking: .thinkTags(startsInside: true, toggleable: true))
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            supportsVision: model.supportsVision)
     }
 }

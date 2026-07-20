@@ -13,10 +13,14 @@ struct RootView: View {
     @State private var selectedConversationID: UUID?
     @State private var path: [AppRoute] = []
     @State private var showSplash = true
+    /// Shared open/anchor state for the root-hosted header dropdowns.
+    @State private var dropdown = HeaderDropdown()
     @AppStorage(Keys.appearance) private var appearance = Keys.Defaults.appearance
     /// User-dragged sidebar width; stays put when the window resizes
     /// (unlike HSplitView's proportional redistribution).
     @AppStorage("sidebarWidth") private var sidebarWidth = Double(Studio.sidebarWidth)
+    /// Collapsed hides the sidebar entirely; expanding restores the dragged width.
+    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
     @State private var dragBaseWidth: Double?
 
     @Query(sort: \Conversation.updatedAt, order: .reverse)
@@ -40,23 +44,33 @@ struct RootView: View {
                 chat.conversationStore = ConversationStore(context: modelContext)
             }
             // UI-verification hooks: `--route settings|models` deep-links a pushed
-            // page; `--open-chat <n>` selects the nth most recent conversation.
-            let arguments = ProcessInfo.processInfo.arguments
-            if let index = arguments.firstIndex(of: "--route"), index + 1 < arguments.count {
-                switch arguments[index + 1] {
-                case "settings": push(.settings)
-                case "models": push(.models)
-                default: break
+            // page; `--open-chat <n>` selects the nth most recent conversation;
+            // `--sidebar-expanded` forces the sidebar open for screenshots.
+            // Deferred out of the first layout transaction: mutating @AppStorage
+            // and @State while the window is being set up can prevent it from
+            // ever being ordered onscreen (combined hooks reproduce this on a
+            // fresh-preferences machine).
+            Task { @MainActor in
+                let arguments = ProcessInfo.processInfo.arguments
+                if arguments.contains("--sidebar-expanded") {
+                    sidebarCollapsed = false
                 }
-            }
-            if let index = arguments.firstIndex(of: "--open-chat"), index + 1 < arguments.count,
-               let n = Int(arguments[index + 1]), conversations.indices.contains(n) {
-                selectedConversationID = conversations[n].id
-            }
-            // `--seed-demo` inserts a showcase conversation (markdown, LaTeX,
-            // code, thinking) for documentation screenshots, then selects it.
-            if arguments.contains("--seed-demo"), let store = chat.conversationStore {
-                selectedConversationID = DemoSeed.insert(using: store)
+                if let index = arguments.firstIndex(of: "--route"), index + 1 < arguments.count {
+                    switch arguments[index + 1] {
+                    case "settings": push(.settings)
+                    case "models": push(.models)
+                    default: break
+                    }
+                }
+                if let index = arguments.firstIndex(of: "--open-chat"), index + 1 < arguments.count,
+                   let n = Int(arguments[index + 1]), conversations.indices.contains(n) {
+                    selectedConversationID = conversations[n].id
+                }
+                // `--seed-demo` inserts a showcase conversation (markdown, LaTeX,
+                // code, thinking) for documentation screenshots, then selects it.
+                if arguments.contains("--seed-demo"), let store = chat.conversationStore {
+                    selectedConversationID = DemoSeed.insert(using: store)
+                }
             }
         }
         .task {
@@ -69,8 +83,26 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .settingsRoute)) { _ in
             push(.settings)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
+            sidebarCollapsed.toggle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newChat)) { _ in
+            // Same action as SidebarView's New chat button: clear selection so
+            // ChatScreen shows the welcome state (conversation is created lazily
+            // on first send). Idempotent while already on welcome.
+            selectedConversationID = nil
+            path.removeAll()
+        }
         .onChange(of: appearance) {
             AppAppearance.apply(appearance)
+        }
+        // Close any open header dropdown on context changes the scrim can't
+        // catch: navigation (glass buttons receive clicks above the scrim),
+        // sidebar collapse, and Esc (posted by the app's key monitor).
+        .onChange(of: path) { dropdown.open = nil }
+        .onChange(of: sidebarCollapsed) { dropdown.open = nil }
+        .onReceive(NotificationCenter.default.publisher(for: .dismissHeaderDropdown)) { _ in
+            dropdown.open = nil
         }
     }
 
@@ -79,13 +111,15 @@ struct RootView: View {
     /// hidden-titlebar window keeps its traffic lights and gains no toolbar inset.
     private var mainLayout: some View {
         HStack(spacing: 0) {
-            SidebarView(
-                selectedConversationID: $selectedConversationID,
-                onOpenSettings: { push(.settings) },
-                onNavigateHome: { path.removeAll() })
-            .frame(width: sidebarWidth)
+            if !sidebarCollapsed {
+                SidebarView(
+                    selectedConversationID: $selectedConversationID,
+                    onOpenSettings: { push(.settings) },
+                    onNavigateHome: { path.removeAll() })
+                .frame(width: sidebarWidth)
 
-            splitHandle
+                splitHandle
+            }
 
             detailPane
                 .frame(minWidth: 400, maxWidth: .infinity)
@@ -102,7 +136,49 @@ struct RootView: View {
                 }
                 .animation(.easeOut(duration: 0.25), value: chat.modelStore.downloadProgress.isEmpty)
         }
+        .animation(.easeOut(duration: 0.22), value: sidebarCollapsed)
         .ignoresSafeArea()
+        .coordinateSpace(name: windowRootCoordinateSpace)
+        // Dropdown dismissal scrim: covers the whole window (sidebar included)
+        // while a header dropdown is open; first click outside closes it.
+        .overlay {
+            if dropdown.open != nil {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { dropdown.open = nil }
+                    .transition(.opacity)
+            }
+        }
+        // Root-hosted dropdown panel, anchored below its header button. Hosted
+        // here (not per-button) because the header's safeAreaInset bar clips
+        // its content to the bar region.
+        .overlay(alignment: .topLeading) {
+            if let kind = dropdown.open, let anchor = dropdown.anchors[kind] {
+                let width: CGFloat = kind == .modelPicker ? 185 : 175
+                Group {
+                    switch kind {
+                    case .modelPicker:
+                        ModelPickerPanel(onManageModels: { push(.models) })
+                    case .promptPresets:
+                        PromptPresetPanel()
+                    }
+                }
+                .dropdownChrome(width: width)
+                .offset(x: max(8, anchor.maxX - width), y: anchor.maxY + 6)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: dropdown.open)
+        // Outermost so the overlay layers above inherit it too: an overlay
+        // inherits the environment from its wrapper, not from an injection
+        // applied earlier in the chain (the panel crashed on a missing
+        // HeaderDropdown when it was injected before the overlays).
+        .environment(dropdown)
+        // Prompt editor, hosted here so closing the dropdown (which removes
+        // the panel) cannot tear the sheet down.
+        .sheet(item: $dropdown.editingPrompt) { preset in
+            EditPromptSheet(preset: preset)
+        }
     }
 
     private var detailPane: some View {
@@ -113,9 +189,6 @@ struct RootView: View {
                     let conversation = chat.conversationStore?.newConversation()
                     selectedConversationID = conversation?.id
                     return conversation
-                },
-                onManageModels: {
-                    push(.models)
                 })
             .opacity(path.isEmpty ? 1 : 0)
             .allowsHitTesting(path.isEmpty)

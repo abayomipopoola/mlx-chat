@@ -10,6 +10,7 @@ enum Keys {
     static let promptPreset = "prompt.preset"
     static let autoUnloadMinutes = "autoUnloadMinutes"
     static let appearance = "appearance"
+    static let sidebarCollapsed = "sidebarCollapsed"
     static let thinkingEnabled = "thinking.enabled"
     static let downloadedModels = "downloadedModels"
     static let customModels = "customModels"
@@ -25,6 +26,7 @@ enum Keys {
         static let autoUnloadMinutes = 10
         /// "system" | "light" | "dark"
         static let appearance = "system"
+        static let sidebarCollapsed = false
         static let thinkingEnabled = true
     }
 }

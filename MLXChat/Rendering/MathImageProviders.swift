@@ -7,8 +7,8 @@ import SwiftUI
 enum MathRenderer {
     private static let cache = NSCache<NSString, NSImage>()
 
-    static func render(base64URL encoded: String, display: Bool, fontSize: CGFloat, color: NSColor) -> NSImage {
-        let key = "\(display ? "d" : "i")|\(fontSize)|\(color.description)|\(encoded)" as NSString
+    static func render(base64URL encoded: String, display: Bool, boxed: Bool = false, fontSize: CGFloat, color: NSColor) -> NSImage {
+        let key = "\(display ? "d" : "i")|\(boxed ? "b" : "-")|\(fontSize)|\(color.description)|\(encoded)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
 
         let latex = MathPreprocessor.decodeBase64URL(encoded) ?? ""
@@ -25,13 +25,32 @@ enum MathRenderer {
 
         let final: NSImage
         if error == nil, let image {
-            final = image
+            final = boxed ? framed(image, color: color) : image
         } else {
             // Invalid LaTeX: show the literal source rather than nothing.
             final = literalImage(text: latex.isEmpty ? "math" : latex, color: color)
         }
         cache.setObject(final, forKey: key)
         return final
+    }
+
+    /// \boxed{…} emulation: SwiftMath has no \boxed support, so the box is
+    /// drawn around the already-rendered expression instead.
+    private static func framed(_ image: NSImage, color: NSColor) -> NSImage {
+        let padX: CGFloat = 6
+        let padY: CGFloat = 4
+        let size = NSSize(
+            width: image.size.width + padX * 2,
+            height: image.size.height + padY * 2)
+        return NSImage(size: size, flipped: false) { rect in
+            image.draw(in: NSRect(x: padX, y: padY, width: image.size.width, height: image.size.height))
+            let path = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+            color.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            return true
+        }
     }
 
     private static func literalImage(text: String, color: NSColor) -> NSImage {
@@ -49,7 +68,8 @@ enum MathRenderer {
     }
 }
 
-/// Handles `swiftmath://i/<b64url>` inside lines of text.
+/// Handles `swiftmath://i/<b64url>` and boxed `swiftmath://bi/<b64url>` inside
+/// lines of text.
 struct MathInlineProvider: InlineImageProvider {
     let fontSize: CGFloat
     let color: NSColor
@@ -59,15 +79,19 @@ struct MathInlineProvider: InlineImageProvider {
     func image(with url: URL, label: String) async throws -> Image {
         guard url.scheme == "swiftmath" else { throw UnsupportedURL() }
         let encoded = String(url.path.dropFirst())  // strip leading "/"
-        let display = url.host == "d"
+        let host = url.host ?? ""
         let nsImage = MathRenderer.render(
-            base64URL: encoded, display: display, fontSize: fontSize, color: color)
+            base64URL: encoded,
+            display: host == "d" || host == "bd",
+            boxed: host == "bi" || host == "bd",
+            fontSize: fontSize,
+            color: color)
         return Image(nsImage: nsImage)
     }
 }
 
-/// Handles `swiftmath://d/<b64url>` block images; renders other URLs as plain links
-/// (never fetches the network — privacy).
+/// Handles `swiftmath://d/<b64url>` and boxed `swiftmath://bd/<b64url>` block
+/// images; renders other URLs as plain links (never fetches the network — privacy).
 struct MathBlockProvider: ImageProvider {
     let fontSize: CGFloat
     let color: NSColor
@@ -75,9 +99,11 @@ struct MathBlockProvider: ImageProvider {
     @ViewBuilder
     func makeImage(url: URL?) -> some View {
         if let url, url.scheme == "swiftmath" {
+            let host = url.host ?? ""
             let nsImage = MathRenderer.render(
                 base64URL: String(url.path.dropFirst()),
-                display: url.host == "d",
+                display: host == "d" || host == "bd",
+                boxed: host == "bi" || host == "bd",
                 fontSize: fontSize,
                 color: color)
             if nsImage.size.width > 720 {

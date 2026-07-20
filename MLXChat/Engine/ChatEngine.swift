@@ -4,6 +4,15 @@ struct EngineMessage {
     enum Role { case user, assistant }
     let role: Role
     let text: String
+    /// Downscaled JPEG image payloads for the pending user turn (VLM only).
+    /// Default empty so existing call sites compile unchanged.
+    let images: [Data]
+
+    init(role: Role, text: String, images: [Data] = []) {
+        self.role = role
+        self.text = text
+        self.images = images
+    }
 }
 
 enum EngineEvent {

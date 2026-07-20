@@ -34,9 +34,24 @@ final class ConversationStore {
     }
 
     @discardableResult
-    func appendMessage(role: String, content: String, to conversation: Conversation, modelID: String? = nil) -> ChatMessage {
+    func appendMessage(
+        role: String,
+        content: String,
+        to conversation: Conversation,
+        modelID: String? = nil,
+        imageData: Data? = nil,
+        attachmentName: String? = nil,
+        attachmentText: String? = nil
+    ) -> ChatMessage {
         let nextIndex = (conversation.orderedMessages.last?.sortIndex ?? -1) + 1
-        let message = ChatMessage(role: role, content: content, sortIndex: nextIndex, modelID: modelID)
+        let message = ChatMessage(
+            role: role,
+            content: content,
+            sortIndex: nextIndex,
+            modelID: modelID,
+            imageData: imageData,
+            attachmentName: attachmentName,
+            attachmentText: attachmentText)
         message.conversation = conversation
         context.insert(message)
         conversation.updatedAt = .now

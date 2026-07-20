@@ -9,8 +9,6 @@ struct MessageView: View {
     let message: ChatMessage
     let conversation: Conversation?
 
-    @State private var copied = false
-
     var body: some View {
         if message.isUser {
             userBubble
@@ -22,15 +20,51 @@ struct MessageView: View {
     // MARK: - User
 
     private var userBubble: some View {
-        HStack {
-            Spacer(minLength: 80)
-            Text(message.content)
-                .font(.system(size: 15))
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color.bubbleFill)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        VStack(alignment: .trailing, spacing: 6) {
+            HStack {
+                Spacer(minLength: 80)
+                VStack(alignment: .trailing, spacing: 8) {
+                    if let data = message.imageData, let nsImage = NSImage(data: data) {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    if let name = message.attachmentName {
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.fill")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.iconBlue)
+                            Text(name)
+                                .font(.system(size: 12.5))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(Color.fieldFill))
+                        .overlay(
+                            Capsule().strokeBorder(Color.cardStroke, lineWidth: 1))
+                    }
+
+                    if !message.content.isEmpty {
+                        Text(message.content)
+                            .font(.system(size: 15))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.bubbleFill)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                }
+            }
+            if !message.content.isEmpty {
+                CopyButton(text: message.content, size: 11)
+                    .padding(.top, 4)
+                    .padding(.trailing, 6)
+            }
         }
     }
 
@@ -116,22 +150,7 @@ struct MessageView: View {
     private var footer: some View {
         if !isStreamingThis {
             HStack(spacing: 16) {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message.content, forType: .string)
-                    copied = true
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.5))
-                        copied = false
-                    }
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 14))
-                        .frame(width: 16, height: 16)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(copied ? Color.brandGreen : .secondary)
-                .help("Copy")
+                CopyButton(text: message.content, size: 11)
 
                 if isLastMessage, conversation != nil {
                     Button {
@@ -140,7 +159,7 @@ struct MessageView: View {
                         }
                     } label: {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 14))
+                            .font(.system(size: 11))
                             .frame(width: 16, height: 16)
                     }
                     .buttonStyle(.plain)
@@ -157,6 +176,33 @@ struct MessageView: View {
             }
             .padding(.top, 2)
         }
+    }
+}
+
+/// NSPasteboard copy with a 1.5s checkmark flip — shared by the assistant
+/// footer and the user bubble (which uses the smaller `size`).
+private struct CopyButton: View {
+    let text: String
+    var size: CGFloat = 14
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: size))
+                .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(copied ? Color.brandGreen : .secondary)
+        .help("Copy")
     }
 }
 

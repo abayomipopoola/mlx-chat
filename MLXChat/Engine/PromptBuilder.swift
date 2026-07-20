@@ -21,6 +21,13 @@ enum PromptBuilder {
         return core + "\n\n# User's custom instructions\n" + String(instructions.prefix(1000))
     }
 
+    /// Compose the user-turn text sent to the engine. When a file attachment is
+    /// present, appends a `[File: name]` block with the extracted body.
+    static func userText(content: String, attachmentName: String?, attachmentText: String?) -> String {
+        guard let name = attachmentName, let text = attachmentText else { return content }
+        return content + "\n\n[File: \(name)]\n\(text)"
+    }
+
     /// Estimate tokens as ~4 chars each; keep the newest messages within 70% of the
     /// context window, dropping oldest user/assistant pairs. The final (pending) message
     /// is never dropped, even if it alone exceeds the budget.

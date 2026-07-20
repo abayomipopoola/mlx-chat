@@ -2,8 +2,9 @@ import Testing
 @testable import MLXChat
 
 /// Contract: MathPreprocessor rewrites LaTeX spans to swiftmath:// image links
-/// (inline `i`, display `d` on its own paragraph), leaves money amounts and inline
-/// code untouched, and base64url survives a round trip.
+/// (inline `i`, display `d` on its own paragraph, boxed variants `bi`/`bd`),
+/// leaves money amounts and inline code untouched, and base64url survives a
+/// round trip.
 @Suite struct MathTests {
     /// Extracts the base64url payload of the first `swiftmath://<host>/…)` link.
     private func payload(host: String, in output: String) -> String? {
@@ -47,6 +48,73 @@ import Testing
         #expect(output.contains("swiftmath://i/"))
         #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
             == "x_1")
+    }
+
+    @Test func bareBoxedBecomesBoxedInlineImage() {
+        // The reported bug: models end answers with `\boxed{…}` and no math
+        // delimiters — it must render boxed, not leak raw LaTeX.
+        let output = MathPreprocessor.preprocess("The answer is \\boxed{73682}.")
+        #expect(output.contains("The answer is "))
+        #expect(output.contains("swiftmath://bi/"))
+        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "73682")
+    }
+
+    @Test func dollarWrappedBoxedBecomesBoxedInlineImage() {
+        let output = MathPreprocessor.preprocess("Answer: $\\boxed{73682}$")
+        #expect(output.contains("swiftmath://bi/"))
+        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "73682")
+    }
+
+    @Test func displayBoxedBecomesBoxedDisplayImage() {
+        let output = MathPreprocessor.preprocess("$$\\boxed{x}$$")
+        #expect(output.contains("swiftmath://bd/"))
+        #expect(payload(host: "bd", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "x")
+    }
+
+    @Test func bracketMathEmbeddedInTextLineRendersInline() {
+        // The reported bug: "…in one line: \[ \boxed{…} \]" broke into its own
+        // centered block; an embedded display span must stay on the text line.
+        let output = MathPreprocessor.preprocess(
+            "So the whole update rule in one line: \\[\\boxed{\\theta_{t+1} = \\theta_t - \\eta\\,\\nabla L(\\theta_t)}\\]")
+        #expect(output.contains("So the whole update rule in one line: "))
+        #expect(output.contains("swiftmath://bi/"))
+        #expect(!output.contains("swiftmath://bd/"))
+    }
+
+    @Test func dollarDisplayEmbeddedInTextLineRendersInline() {
+        let output = MathPreprocessor.preprocess("Inline here: $$x_1$$ tail")
+        #expect(output.contains("swiftmath://i/"))
+        #expect(!output.contains("swiftmath://d/"))
+    }
+
+    @Test func bracketMathAloneOnItsLineStaysDisplayBlock() {
+        let output = MathPreprocessor.preprocess("Result:\n\\[\n\\int_0^1 x\\,dx\n\\]\n")
+        #expect(output.contains("swiftmath://d/"))
+        #expect(payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\n\\int_0^1 x\\,dx\n")
+    }
+
+    @Test func boxedEmbeddedInDisplayMathIsStripped() {
+        // SwiftMath has no \boxed: inside a larger expression keep the content
+        // so the surrounding math still renders.
+        let output = MathPreprocessor.preprocess("$$x = \\boxed{5}$$")
+        #expect(!output.contains("swiftmath://bd/"))
+        #expect(payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "x = 5")
+    }
+
+    @Test func nestedBracesInsideBoxedSurvive() {
+        let output = MathPreprocessor.preprocess("\\boxed{\\frac{1}{2}}")
+        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\\frac{1}{2}")
+    }
+
+    @Test func boxedInsideInlineCodeIsUntouched() {
+        let input = "use `\\boxed{x}` here"
+        #expect(MathPreprocessor.preprocess(input) == input)
     }
 
     @Test(arguments: [

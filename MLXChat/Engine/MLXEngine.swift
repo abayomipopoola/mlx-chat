@@ -1,9 +1,11 @@
+import CoreImage
 import Foundation
 import HuggingFace
 import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Tokenizers
 
 /// One MLX model held in RAM, with a KV-cached ChatSession per conversation.
@@ -56,11 +58,24 @@ final class MLXEngine: ChatEngine {
         }
 
         do {
-            let loaded = try await LLMModelFactory.shared.loadContainer(
-                from: HubDownloader(ModelStore.hubClient),
-                using: #huggingFaceTokenizerLoader(),
-                configuration: configuration,
-                progressHandler: { progress($0.fractionCompleted) })
+            // Route mlx C-level errors (e.g. affine quantize rejection) into
+            // thrown MLXError.caught instead of the default fatalError/SIGTRAP.
+            // Vision models load via VLMModelFactory; text-only via LLMModelFactory.
+            let loaded = try await withError {
+                if model.supportsVision {
+                    try await VLMModelFactory.shared.loadContainer(
+                        from: HubDownloader(ModelStore.hubClient),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration,
+                        progressHandler: { progress($0.fractionCompleted) })
+                } else {
+                    try await LLMModelFactory.shared.loadContainer(
+                        from: HubDownloader(ModelStore.hubClient),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration,
+                        progressHandler: { progress($0.fractionCompleted) })
+                }
+            }
             // Unloaded (model switch) while we were loading: drop the weights
             // instead of resurrecting a container nobody owns.
             try Task.checkCancellation()
@@ -87,6 +102,10 @@ final class MLXEngine: ChatEngine {
 
     private static func mapLoadError(_ error: Error) -> Error {
         let text = String(describing: error)
+        if text.contains("[quantize]") || text.localizedCaseInsensitiveContains("not supported") {
+            return EngineError.generationFailed(
+                "This model's quantization isn't supported by the MLX runtime in this build.")
+        }
         if text.localizedCaseInsensitiveContains("unsupported") || text.localizedCaseInsensitiveContains("model type") {
             return EngineError.generationFailed("This model's architecture isn't supported by the MLX runtime.")
         }
@@ -161,7 +180,20 @@ final class MLXEngine: ChatEngine {
                     }
                     var tokensPerSecond: Double?
 
-                    for try await event in session.streamDetails(to: pending.text) {
+                    // Images go only with the pending user turn; prior history
+                    // stays text-only (old images are not re-fed to the KV cache).
+                    let stream: AsyncThrowingStream<Generation, Error>
+                    if model.supportsVision, !pending.images.isEmpty {
+                        let images: [UserInput.Image] = pending.images.compactMap { data in
+                            guard let ciImage = CIImage(data: data) else { return nil }
+                            return .ciImage(ciImage)
+                        }
+                        stream = session.streamDetails(to: pending.text, images: images)
+                    } else {
+                        stream = session.streamDetails(to: pending.text)
+                    }
+
+                    for try await event in stream {
                         try Task.checkCancellation()
                         switch event {
                         case .chunk(let text):

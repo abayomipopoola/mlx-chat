@@ -50,5 +50,7 @@ enum DemoSeed {
             theta -= learningRate * lossGradient(at: theta)
         }
         ```
+
+        So the whole update rule in one line: \\boxed{\\theta_{t+1} = \\theta_t - \\eta \\, \\nabla L(\\theta_t)}
         """
 }

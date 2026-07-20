@@ -9,6 +9,7 @@ struct SidebarView: View {
     /// Pops any pushed page (Settings/Models) so the chat is visible again.
     var onNavigateHome: () -> Void = {}
 
+    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
     @Query(sort: \Conversation.updatedAt, order: .reverse)
     private var conversations: [Conversation]
 
@@ -22,6 +23,40 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Top band: traffic lights overlay the leading side; settings and
+            // the sidebar toggle sit at the trailing side in the same band.
+            HStack(spacing: 8) {
+                Spacer()
+                Button {
+                    onOpenSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("settingsGearButton")
+                .help("Settings")
+                Button {
+                    sidebarCollapsed = true
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Hide Sidebar (⌃⌘S)")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 22)
+
             Button {
                 selectedConversationID = nil
                 onNavigateHome()
@@ -32,10 +67,16 @@ struct SidebarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .keyboardShortcut("n", modifiers: .control)
+            .accessibilityIdentifier("newChatButton")
+            .help("New chat (⌃N)")
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
 
-            StudioSearchField(placeholder: "Search", text: $searchText)
+            StudioSearchField(
+                placeholder: "Search", text: $searchText,
+                ringColor: .brandGreen, ringOnFocusOnly: true,
+                accessibilityIdentifier: "sidebarSearchField")
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
 
@@ -48,22 +89,8 @@ struct SidebarView: View {
                 .padding(.horizontal, 10)
                 .padding(.top, 2)
             }
-
-            Divider()
-                .overlay(Color.cardStroke)
-            Button {
-                onOpenSettings()
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-                    .font(Studio.body14Semibold)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .accessibilityIdentifier("conversationList")
         }
-        .padding(.top, Studio.trafficLightInset)
         .background(Color.sidebarBackground)
         .alert("Rename Chat", isPresented: Binding(
             get: { renameTarget != nil },

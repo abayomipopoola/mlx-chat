@@ -6,36 +6,34 @@ import SwiftUI
 /// MODELS → MEMORY → AI ENGINE → MODEL STORAGE → THEME.
 /// White cards with hairline strokes.
 struct SettingsPage: View {
-    @Environment(ChatController.self) private var chat
     @Environment(UpdateController.self) private var updates
     /// Pops back to the chat (custom routing, no NavigationStack).
     var onBack: () -> Void = {}
     /// Pushes the Manage Models page.
     var onManageModels: () -> Void = {}
 
-    @AppStorage(Keys.autoUnloadMinutes) private var autoUnloadMinutes = Keys.Defaults.autoUnloadMinutes
-    @AppStorage(Keys.appearance) private var appearance = Keys.Defaults.appearance
-
-    @State private var usedBytes: Int64 = 0
-    @State private var availableBytes: Int64 = 0
-
     var body: some View {
         VStack(spacing: 0) {
             StudioPageHeader(title: "Settings", onBack: onBack)
             if let version = updates.availableVersion {
-                updateBanner(version: version)
+                UpdateBanner(version: version)
             }
-            settingsContent
+            SettingsContent(onManageModels: onManageModels)
         }
         .background(Color.detailBackground)
         .onAppear {
-            refreshUsage()
             updates.checkInBackground()
         }
     }
+}
 
-    /// Notifier shown above the settings when a newer version is on the appcast.
-    private func updateBanner(version: String) -> some View {
+// MARK: - Update banner
+
+private struct UpdateBanner: View {
+    @Environment(UpdateController.self) private var updates
+    let version: String
+
+    var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 20))
@@ -60,32 +58,38 @@ struct SettingsPage: View {
             Rectangle().fill(Color.cardStroke).frame(height: 1)
         }
     }
+}
 
-    private var settingsContent: some View {
+// MARK: - Content
+
+private struct SettingsContent: View {
+    var onManageModels: () -> Void
+
+    var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 section("Models") {
-                    card { manageModelsRow }
+                    card { ManageModelsRow(onManageModels: onManageModels) }
                 }
 
                 section("Memory") {
-                    card { autoUnloadCard }
+                    card { AutoUnloadCard() }
                 }
 
                 section("AI Engine") {
                     card(stroke: AppleIntelligenceEngine.isAvailable
                         ? Color.brandGreen.opacity(0.55) : .cardStroke,
                         padding: 0) {
-                        appleIntelligenceCard
+                        AppleIntelligenceCard()
                     }
                 }
 
                 section("Model Storage") {
-                    card { storageRows }
+                    card { StorageSection() }
                 }
 
                 section("Theme") {
-                    card { themeRow }
+                    card { ThemeRow() }
                 }
             }
             .frame(maxWidth: Studio.contentMaxWidth)
@@ -94,8 +98,6 @@ struct SettingsPage: View {
             .padding(.vertical, 24)
         }
     }
-
-    // MARK: - Layout helpers
 
     private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -114,10 +116,15 @@ struct SettingsPage: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .studioCard(stroke: stroke, padding: padding)
     }
+}
 
-    // MARK: - Models
+// MARK: - Models
 
-    private var manageModelsRow: some View {
+private struct ManageModelsRow: View {
+    @Environment(ChatController.self) private var chat
+    var onManageModels: () -> Void
+
+    var body: some View {
         Button {
             onManageModels()
         } label: {
@@ -136,11 +143,17 @@ struct SettingsPage: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("manageModelsRow")
     }
+}
 
-    // MARK: - Memory (auto-unload)
+// MARK: - Memory (auto-unload)
 
-    private var autoUnloadCard: some View {
+private struct AutoUnloadCard: View {
+    @AppStorage(Keys.autoUnloadMinutes) private var autoUnloadMinutes = Keys.Defaults.autoUnloadMinutes
+    @AppStorage(Keys.appearance) private var appearance = Keys.Defaults.appearance
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "timer")
@@ -149,7 +162,7 @@ struct SettingsPage: View {
                 Text("Auto-Unload After")
                     .font(Studio.rowTitle)
                 Spacer()
-                Picker("", selection: $autoUnloadMinutes) {
+                Picker("Auto-Unload After", selection: $autoUnloadMinutes) {
                     Text("2 minutes").tag(2)
                     Text("10 minutes").tag(10)
                     Text("1 hour").tag(60)
@@ -158,6 +171,8 @@ struct SettingsPage: View {
                 .labelsHidden()
                 .fixedSize()
                 .tint(Color.brandGreen)
+                // The control caches its appearance; rebuild it whenever the
+                // app-wide override changes so the labels never go invisible.
                 .id(appearance)
             }
             Text("Frees RAM by unloading models after inactivity.")
@@ -165,21 +180,34 @@ struct SettingsPage: View {
                 .foregroundStyle(.secondary)
         }
     }
+}
 
-    // MARK: - Apple Intelligence
+// MARK: - Apple Intelligence
+
+private struct AppleIntelligenceCard: View {
+    @Environment(ChatController.self) private var chat
+
+    private static let aiSymbolName: String =
+        NSImage(systemSymbolName: "apple.intelligence", accessibilityDescription: nil) != nil
+            ? "apple.intelligence" : "sparkles"
 
     private var isAppleIntelligenceSelected: Bool {
         chat.selectedModelID == appleIntelligenceEngineID
     }
 
-    private var aiSymbolName: String {
-        NSImage(systemSymbolName: "apple.intelligence", accessibilityDescription: nil) != nil
-            ? "apple.intelligence" : "sparkles"
+    private var contextCaption: String {
+        if AppleIntelligenceEngine.isAvailable {
+            return "\(AppleIntelligenceEngine.contextTokens) token context • Text only"
+        }
+        return "Text only"
     }
 
-    private var appleIntelligenceCard: some View {
-        let availabilityMessage = AppleIntelligenceEngine.availabilityMessage()
-        return VStack(spacing: 0) {
+    private var availabilityMessage: String? {
+        AppleIntelligenceEngine.availabilityMessage()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
             Button {
                 if availabilityMessage == nil {
                     chat.selectedModelID = appleIntelligenceEngineID
@@ -193,7 +221,7 @@ struct SettingsPage: View {
                                 startPoint: .topLeading, endPoint: .bottomTrailing))
                         .frame(width: 44, height: 44)
                         .overlay {
-                            Image(systemName: aiSymbolName)
+                            Image(systemName: Self.aiSymbolName)
                                 .font(.system(size: 22))
                                 .foregroundStyle(.white)
                         }
@@ -228,6 +256,7 @@ struct SettingsPage: View {
             }
             .buttonStyle(.plain)
             .disabled(availabilityMessage != nil)
+            .accessibilityIdentifier("aiEngineCard")
 
             Divider()
 
@@ -241,17 +270,14 @@ struct SettingsPage: View {
             .padding(.vertical, 10)
         }
     }
+}
 
-    private var contextCaption: String {
-        if AppleIntelligenceEngine.isAvailable {
-            return "\(AppleIntelligenceEngine.contextTokens) token context • Text only"
-        }
-        return "Text only"
-    }
+// MARK: - Theme
 
-    // MARK: - Theme
+private struct ThemeRow: View {
+    @AppStorage(Keys.appearance) private var appearance = Keys.Defaults.appearance
 
-    private var themeRow: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "circle.lefthalf.filled")
@@ -260,7 +286,7 @@ struct SettingsPage: View {
                 Text("Appearance")
                     .font(Studio.rowTitle)
                 Spacer()
-                Picker("", selection: $appearance) {
+                Picker("Appearance", selection: $appearance) {
                     Text("Auto").tag("system")
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
@@ -277,10 +303,21 @@ struct SettingsPage: View {
                 .foregroundStyle(.secondary)
         }
     }
+}
 
-    // MARK: - Storage
+// MARK: - Storage
 
-    private var storageRows: some View {
+private struct StorageSection: View {
+    @State private var usedBytes: Int64 = 0
+    @State private var availableBytes: Int64 = 0
+
+    private var usageFraction: Double {
+        let total = Double(usedBytes + availableBytes)
+        guard total > 0 else { return 0 }
+        return Double(usedBytes) / total
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "folder")
@@ -333,17 +370,19 @@ struct SettingsPage: View {
                 }
             }
         }
-    }
-
-    private var usageFraction: Double {
-        let total = Double(usedBytes + availableBytes)
-        guard total > 0 else { return 0 }
-        return Double(usedBytes) / total
+        .onAppear {
+            refreshUsage()
+        }
     }
 
     private func refreshUsage() {
-        usedBytes = ModelStore.diskUsageBytes()
-        availableBytes = ModelStore.availableBytes()
+        Task {
+            let (used, available) = await Task.detached(priority: .utility) {
+                (ModelStore.diskUsageBytes(), ModelStore.availableBytes())
+            }.value
+            usedBytes = used
+            availableBytes = available
+        }
     }
 
     private func format(_ bytes: Int64) -> String {

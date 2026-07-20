@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MLXChat
 
@@ -48,5 +49,50 @@ import Testing
 
         #expect(upgraded.supportsThinkingToggle)
         #expect(upgraded.thinking?.startsInside == true)
+    }
+
+    @Test func legacyCatalogModelDecodesWithoutSupportsVision() throws {
+        // Old UserDefaults payload before the vision field existed.
+        let legacy = """
+            {
+              "id": "mlx-community/Old-Model-4bit",
+              "displayName": "Old Model",
+              "sizeGB": 1.5,
+              "ctxTokens": 8192,
+              "quantLabel": "4-bit",
+              "category": "general",
+              "blurb": "Legacy entry.",
+              "extraEOSTokens": [],
+              "thinking": null
+            }
+            """
+        let model = try JSONDecoder().decode(CatalogModel.self, from: Data(legacy.utf8))
+        #expect(model.supportsVision == false)
+        #expect(model.id == "mlx-community/Old-Model-4bit")
+    }
+
+    @Test func visionCatalogModelRoundTripsSupportsVision() throws {
+        let original = CatalogModel(
+            id: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            displayName: "Qwen2.5 VL 7B",
+            sizeGB: 5.25,
+            ctxTokens: 128_000,
+            quantLabel: "4-bit",
+            category: .general,
+            blurb: "Vision-language model.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: nil,
+            supportsVision: true)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(CatalogModel.self, from: data)
+        #expect(decoded.supportsVision == true)
+        #expect(decoded.id == original.id)
+        #expect(decoded.displayName == original.displayName)
+    }
+
+    @Test func qwen25VLFamilyMapsFromDisplayName() {
+        let model = ModelCatalog.model(for: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
+        #expect(model?.supportsVision == true)
+        #expect(model.map { ModelCatalog.familyID(for: $0) } == "qwen25vl")
     }
 }

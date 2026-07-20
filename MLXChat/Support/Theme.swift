@@ -97,6 +97,9 @@ enum Studio {
     /// Sidebar top inset: aligns "New chat" with the bottom edge of the detail
     /// pane's fixed header (16 top padding + 34 capsule + 4 bottom).
     static let trafficLightInset: CGFloat = 54
+    /// Leading clearance for the window traffic lights when the sidebar is
+    /// collapsed and detail content reaches the window's top-left corner.
+    static let trafficLightClearance: CGFloat = 78
 
     // Type scale measured from MLX Studio captures (band scan + width calibration),
     // hero sizes taken a step down per user preference.
@@ -159,10 +162,32 @@ struct SectionHeader: View {
     }
 }
 
-/// Rounded gray search field shared by the sidebar and Manage Models.
+/// Mutable bag for the click-outside NSEvent monitor (View is a value type).
+private final class SearchFieldClickOutsideContext {
+    var fieldFrame: CGRect = .zero
+    var keyWindow: NSWindow?
+    var clearFocus: (() -> Void)?
+}
+
+/// Liquid-glass search field shared by the sidebar and Manage Models.
 struct StudioSearchField: View {
     let placeholder: String
     @Binding var text: String
+    /// Sidebar keeps the compact 7; Manage Models matches button height (10).
+    var verticalPadding: CGFloat = 7
+    /// Sidebar keeps 8; Manage Models uses a roomier inset.
+    var horizontalPadding: CGFloat = 8
+    /// Optional accent ring around the pill (Manage Models brand-green ring).
+    var ringColor: Color? = nil
+    /// When true, the ring only appears while the field is focused (sidebar).
+    var ringOnFocusOnly: Bool = false
+    /// Optional accessibility id for the inner TextField (UI tests).
+    var accessibilityIdentifier: String? = nil
+
+    @FocusState private var focused: Bool
+    @State private var fieldFrame: CGRect = .zero
+    @State private var clickMonitor: Any?
+    @State private var clickOutsideContext = SearchFieldClickOutsideContext()
 
     var body: some View {
         HStack(spacing: 6) {
@@ -170,12 +195,99 @@ struct StudioSearchField: View {
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
+                .focused($focused)
+                .modifier(OptionalAccessibilityIdentifier(accessibilityIdentifier))
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: Studio.radiusField, style: .continuous)
-                .fill(Color.fieldFill))
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous))
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .global)
+        } action: { frame in
+            fieldFrame = frame
+            clickOutsideContext.fieldFrame = frame
+        }
+        .onChange(of: focused) { _, isFocused in
+            syncClickOutsideMonitor(isFocused: isFocused)
+        }
+        .onDisappear {
+            removeClickOutsideMonitor()
+        }
+        .onAppear {
+            // AppKit makes the first key view (this field) first responder when
+            // the window keys — AFTER onAppear. The ring is a clicked-into
+            // indicator, so clear the launch auto-focus on a short delay.
+            if ringOnFocusOnly {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { focused = false }
+            }
+        }
+        .overlay {
+            if let ringColor, !ringOnFocusOnly || focused {
+                RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous)
+                    .strokeBorder(ringColor, lineWidth: 1.5)
+            }
+        }
+    }
+
+    private func syncClickOutsideMonitor(isFocused: Bool) {
+        removeClickOutsideMonitor()
+        guard ringOnFocusOnly, isFocused else { return }
+
+        clickOutsideContext.fieldFrame = fieldFrame
+        clickOutsideContext.keyWindow = NSApp.keyWindow
+        clickOutsideContext.clearFocus = { focused = false }
+
+        let context = clickOutsideContext
+        clickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { event in
+            if Self.clickIsOutsideSearchField(event: event, context: context) {
+                context.clearFocus?()
+            }
+            return event
+        }
+    }
+
+    private func removeClickOutsideMonitor() {
+        if let clickMonitor {
+            NSEvent.removeMonitor(clickMonitor)
+            self.clickMonitor = nil
+        }
+        clickOutsideContext.clearFocus = nil
+        clickOutsideContext.keyWindow = nil
+    }
+
+    /// AppKit window coords are bottom-left; SwiftUI `.global` is top-left in the content.
+    private static func clickIsOutsideSearchField(
+        event: NSEvent,
+        context: SearchFieldClickOutsideContext
+    ) -> Bool {
+        guard let eventWindow = event.window else { return true }
+        // Menus and other panels use a different window than the one we captured
+        // when the field focused; treat those as outside.
+        if let keyWindow = context.keyWindow, eventWindow !== keyWindow {
+            return true
+        }
+        guard let contentHeight = eventWindow.contentView?.bounds.height else { return true }
+        let flippedY = contentHeight - event.locationInWindow.y
+        let point = CGPoint(x: event.locationInWindow.x, y: flippedY)
+        return !context.fieldFrame.contains(point)
+    }
+}
+
+/// Applies `.accessibilityIdentifier` only when a non-nil id is provided.
+private struct OptionalAccessibilityIdentifier: ViewModifier {
+    let id: String?
+
+    init(_ id: String?) { self.id = id }
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let id {
+            content.accessibilityIdentifier(id)
+        } else {
+            content
+        }
     }
 }
 
@@ -216,6 +328,8 @@ struct StudioPageHeader: View {
     /// Pops the page (custom routing; there is no NavigationStack to dismiss).
     var onBack: () -> Void = {}
 
+    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
+
     var body: some View {
         ZStack {
             HStack {
@@ -228,12 +342,16 @@ struct StudioPageHeader: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("backButton")
                 Spacer()
             }
             Text(title)
                 .font(Studio.pageTitle)
         }
-        .padding(.horizontal, 24)
+        // With the sidebar collapsed the traffic lights sit over the detail
+        // pane's top-left corner; keep the back chevron clear of them.
+        .padding(.leading, sidebarCollapsed ? Studio.trafficLightClearance : 24)
+        .padding(.trailing, 24)
         .padding(.top, 20)
         .padding(.bottom, 12)
     }

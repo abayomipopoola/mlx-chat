@@ -35,6 +35,9 @@ final class ModelStore {
     var lastError: String?
 
     private var downloadTasks: [String: Task<Void, Never>] = [:]
+    /// Cached `ModelSupport.unsupportedReason(modelID:)` results; entry
+    /// invalidated when a download finishes or the model is deleted.
+    private var unsupportedReasonCache: [String: String?] = [:]
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Keys.customModels),
@@ -88,6 +91,18 @@ final class ModelStore {
 
     func isDownloaded(_ id: String) -> Bool {
         Self.localModelDirectory(for: id) != nil
+    }
+
+    /// Why this on-disk model can't run in this build, or nil if it can / isn't local.
+    func unsupportedReason(for id: String) -> String? {
+        // [String: String?] — use updateValue so a nil reason (supported model)
+        // is stored; plain assignment of nil would remove the key instead.
+        if unsupportedReasonCache.index(forKey: id) != nil {
+            return unsupportedReasonCache[id]!
+        }
+        let reason = ModelSupport.unsupportedReason(modelID: id)
+        unsupportedReasonCache.updateValue(reason, forKey: id)
+        return reason
     }
 
     var downloadedCount: Int { allModels.filter { isDownloaded($0.id) }.count }
@@ -151,6 +166,7 @@ final class ModelStore {
             await MainActor.run { [weak self] in
                 self?.downloadProgress[id] = nil
                 self?.downloadTasks[id] = nil
+                self?.unsupportedReasonCache.removeValue(forKey: id)
             }
         }
         downloadTasks[id] = task
@@ -183,6 +199,7 @@ final class ModelStore {
         if let hub = Self.hubRepoDirectory(for: id) {
             try? FileManager.default.removeItem(at: hub)
         }
+        unsupportedReasonCache.removeValue(forKey: id)
     }
 
     // MARK: - Import
@@ -206,7 +223,25 @@ final class ModelStore {
         } catch {
             return "Could not reach Hugging Face: \(error.localizedDescription)"
         }
-        customModels.append(ModelCatalog.importedModel(repoID: trimmed))
+        // Compatibility preflight: fetch config.json and reject what this build
+        // can't run (architecture / quantization) BEFORE pulling gigabytes of
+        // weights — the load path enforces the same gate via ModelSupport.
+        // Also sniffs vision capability so imported VLMs persist supportsVision.
+        let supportsVision: Bool
+        do {
+            let url = URL(string: "https://huggingface.co/\(trimmed)/raw/main/config.json")!
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return "Repository has no readable config.json — it doesn't look like an MLX model."
+            }
+            if let reason = ModelSupport.unsupportedReason(configJSON: data) {
+                return reason
+            }
+            supportsVision = ModelSupport.visionCapable(configJSON: data)
+        } catch {
+            return "Could not verify the model config: \(error.localizedDescription)"
+        }
+        customModels.append(ModelCatalog.importedModel(repoID: trimmed, supportsVision: supportsVision))
         persistCustomModels()
         download(trimmed)
         return nil

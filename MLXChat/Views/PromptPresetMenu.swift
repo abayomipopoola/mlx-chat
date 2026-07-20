@@ -1,14 +1,68 @@
 import SwiftUI
 
-/// Toolbar prompt-preset menu: choose a system-prompt preset, or edit the selected one.
+/// Toolbar prompt-preset picker: choose a system-prompt preset, or edit the
+/// selected one. Toggles the root-hosted prompt dropdown (see WindowDropdown);
+/// the panel lives at the window root because the header's `.safeAreaInset`
+/// bar clips its content to the bar region.
 ///
 /// The toolbar button shows the ACTIVE preset's own glyph (sparkles for General),
-/// so the current selection is visible without opening the menu.
+/// so the current selection is visible without opening the dropdown.
 struct PromptPresetMenu: View {
     @AppStorage(Keys.promptPreset) private var selectedRaw = PromptPreset.general.rawValue
-    /// `.sheet(item:)` gives the editor a fresh identity per preset — a plain
-    /// isPresented sheet would reuse the first presentation's @State text.
-    @State private var editingPreset: PromptPreset?
+    @Environment(HeaderDropdown.self) private var dropdown
+
+    private var current: PromptPreset {
+        PromptPreset(rawValue: selectedRaw) ?? .general
+    }
+
+    /// Per-preset icon color (MLX Studio's palette).
+    private func tint(for preset: PromptPreset) -> Color {
+        switch preset {
+        case .general: return .iconBlue
+        case .creative: return .pink
+        case .roleplay: return .iconPurple
+        case .coding: return .brandGreen
+        case .reasoning: return .iconOrange
+        case .custom: return .secondary
+        }
+    }
+
+    var body: some View {
+        Button {
+            dropdown.toggle(.promptPresets)
+        } label: {
+            Image(systemName: current.icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(tint(for: current))
+                .frame(width: 34, height: 34)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("promptPresetButton")
+        .help("Prompt preset: \(current.displayName)")
+        .dropdownAnchor(.promptPresets, in: dropdown)
+        .onAppear {
+            // UI-verification hooks: open the dropdown (or the prompt editor)
+            // at launch for screenshots.
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("--open-prompt-dropdown") {
+                dropdown.open = .promptPresets
+            }
+            if arguments.contains("--open-prompt-editor") {
+                dropdown.editingPrompt = current
+            }
+        }
+    }
+}
+
+/// The root-hosted dropdown panel: preset rows with a leading checkmark slot,
+/// plus the editor entry point. The editor sheet is NOT hosted here — closing
+/// the dropdown removes this panel, which would tear the sheet down with it;
+/// it is presented from the window root via `HeaderDropdown.editingPrompt`.
+struct PromptPresetPanel: View {
+    @AppStorage(Keys.promptPreset) private var selectedRaw = PromptPreset.general.rawValue
+    @Environment(HeaderDropdown.self) private var dropdown
 
     private var current: PromptPreset {
         PromptPreset(rawValue: selectedRaw) ?? .general
@@ -30,42 +84,65 @@ struct PromptPresetMenu: View {
         selectedRaw = preset.rawValue
         UserDefaults.standard.set(preset.rawValue, forKey: Keys.promptPreset)
         UserDefaults.standard.synchronize()
+        dropdown.open = nil
     }
 
     var body: some View {
-        Menu {
-            Section("Prompt") {
-                ForEach(PromptPreset.allCases) { preset in
-                    Toggle(isOn: Binding(
-                        get: { current == preset },
-                        set: { isOn in
-                            if isOn { choose(preset) }
-                        })) {
-                            Label(preset.displayName, systemImage: preset.icon)
-                        }
-                }
+        VStack(alignment: .leading, spacing: 2) {
+            // Top title, matching the model picker's "Model" label.
+            Text("Prompt")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 20)
+                .padding(.bottom, 2)
+            ForEach(PromptPreset.allCases) { preset in
+                presetRow(preset)
             }
             Divider()
+                .padding(.vertical, 2)
             Button {
-                editingPreset = current
+                dropdown.editingPrompt = current
+                dropdown.open = nil
             } label: {
                 Label("Edit \(current.displayName) Prompt…", systemImage: "pencil")
+                    .font(.system(size: 13))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
-        } label: {
-            Image(systemName: current.icon)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(tint(for: current))
-                .frame(width: 34, height: 34)
-                .background(Circle().fill(Color.sidebarBackground))
-                .contentShape(Circle())
+            .buttonStyle(.plain)
+            .padding(.vertical, 3)
         }
-        .menuStyle(.button)
-        .menuIndicator(.hidden)
-        .buttonStyle(.plain)
-        .help("Prompt preset: \(current.displayName)")
-        .sheet(item: $editingPreset) { preset in
-            EditPromptSheet(preset: preset)
+        .padding(8)
+    }
+
+    private func presetRow(_ preset: PromptPreset) -> some View {
+        HStack(spacing: 6) {
+            // Checkmark slot, reserved for every row so names stay aligned
+            // (native-menu convention, same as the model picker).
+            Image(systemName: "checkmark")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.primary)
+                .opacity(current == preset ? 1 : 0)
+                .frame(width: 14)
+
+            Button {
+                choose(preset)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: preset.icon)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(tint(for: preset))
+                        .frame(width: 16)
+                    Text(preset.displayName)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
+        .padding(.vertical, 3)
     }
 }
 

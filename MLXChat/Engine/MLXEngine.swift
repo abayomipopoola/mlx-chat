@@ -50,7 +50,7 @@ final class MLXEngine: ChatEngine {
         // downloader AND keeps extraEOSTokens — the bare `loadContainer(from: URL, …)`
         // overload would drop them and Qwen models would run past <|im_end|>.
         let configuration: ModelConfiguration
-        if let localDirectory = ModelStore.localModelDirectory(for: model.id) {
+        if let localDirectory = ModelStore.localMLXModelDirectory(for: model.id) {
             configuration = ModelConfiguration(
                 directory: localDirectory, extraEOSTokens: model.extraEOSTokens)
         } else {
@@ -162,8 +162,7 @@ final class MLXEngine: ChatEngine {
                     // models `enable_thinking: false` makes the chat template pre-close the
                     // reasoning span so the model answers directly — applied per turn via
                     // the template context, no session rebuild needed.
-                    let thinkingEnabled = UserDefaults.standard.object(forKey: Keys.thinkingEnabled)
-                        as? Bool ?? Keys.Defaults.thinkingEnabled
+                    let thinkingEnabled = ThinkingPreference.isEnabled
                     var filter = ThinkTagFilter()
                     if let thinking = model.thinking {
                         let active = !thinking.toggleable || thinkingEnabled
@@ -172,12 +171,9 @@ final class MLXEngine: ChatEngine {
                         }
                         // With thinking off the template pre-closes the span, so the stream
                         // is a plain answer — passthrough (the default filter) is correct.
-                        if active {
-                            filter = ThinkTagFilter(
-                                open: thinking.open, close: thinking.close,
-                                startsInside: thinking.startsInside, mayEmit: !thinking.startsInside)
-                        }
+                        filter = thinking.makeFilter(enabled: active)
                     }
+                    var eventRouter = ThinkingEventRouter(filter: filter)
                     var tokensPerSecond: Double?
 
                     // Images go only with the pending user turn; prior history
@@ -197,9 +193,7 @@ final class MLXEngine: ChatEngine {
                         try Task.checkCancellation()
                         switch event {
                         case .chunk(let text):
-                            let routed = filter.consume(text)
-                            if !routed.thinking.isEmpty { continuation.yield(.thinkingDelta(routed.thinking)) }
-                            if !routed.content.isEmpty { continuation.yield(.delta(routed.content)) }
+                            eventRouter.consume(text) { _ = continuation.yield($0) }
                         case .info(let info):
                             tokensPerSecond = info.tokensPerSecond
                         case .toolCall:
@@ -207,15 +201,7 @@ final class MLXEngine: ChatEngine {
                         }
                     }
 
-                    let flush = filter.finish()
-                    if flush.reclassified {
-                        // Think block never closed: everything is the answer.
-                        if !flush.content.isEmpty { continuation.yield(.delta(flush.content)) }
-                        continuation.yield(.thinkingReclassified)
-                    } else {
-                        if !flush.thinking.isEmpty { continuation.yield(.thinkingDelta(flush.thinking)) }
-                        if !flush.content.isEmpty { continuation.yield(.delta(flush.content)) }
-                    }
+                    eventRouter.finish { _ = continuation.yield($0) }
 
                     // Session has now incorporated this user/assistant turn.
                     sessionKnownPriorCount += 2

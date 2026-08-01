@@ -13,17 +13,10 @@ final class ChatController {
     var conversationStore: ConversationStore?
 
     /// Selected engine/model id ("apple-intelligence" or an HF repo id).
-    /// A persisted MLX selection whose files are gone (fresh install, model
-    /// deleted outside the app) falls back to Apple Intelligence silently.
-    var selectedModelID: String = {
-        let saved = UserDefaults.standard.string(forKey: Keys.selectedModelID)
-            ?? Keys.Defaults.selectedModelID
-        guard saved == appleIntelligenceEngineID
-            || (ModelStore.localModelDirectory(for: saved) != nil
-                && ModelSupport.unsupportedReason(modelID: saved) == nil)
-        else { return appleIntelligenceEngineID }
-        return saved
-    }() {
+    /// A persisted local selection whose files are gone (fresh install, moved
+    /// streamed install, or model deleted outside the app) falls back to Apple
+    /// Intelligence silently.
+    var selectedModelID: String {
         didSet {
             UserDefaults.standard.set(selectedModelID, forKey: Keys.selectedModelID)
             guard oldValue != selectedModelID else { return }
@@ -47,16 +40,26 @@ final class ChatController {
     private var activeMessage: ChatMessage?
     private var contentBuffer = ""
     private var thinkingBuffer = ""
+    private var contentCharacterCount = 0
+    private var thinkingCharacterCount = 0
+
+    /// A cheap scroll trigger. ChatScreen observes this instead of counting the
+    /// entire growing String on every SwiftUI body evaluation.
+    private(set) var transcriptRevision = 0
 
     init() {
         let store = ModelStore()
         modelStore = store
         runtime = EngineRuntime(modelStore: store)
+        let saved = UserDefaults.standard.string(forKey: Keys.selectedModelID)
+            ?? Keys.Defaults.selectedModelID
+        selectedModelID = saved == appleIntelligenceEngineID || store.isUsableLocalSelection(saved)
+            ? saved : appleIntelligenceEngineID
     }
 
     var selectedModelDisplayName: String {
         if selectedModelID == appleIntelligenceEngineID { return "Apple Intelligence" }
-        return modelStore.model(for: selectedModelID)?.displayName ?? selectedModelID
+        return modelStore.model(for: selectedModelID)?.pickerDisplayName ?? selectedModelID
     }
 
     /// Whether the header shows the thinking on/off bulb for the selected model.
@@ -116,11 +119,11 @@ final class ChatController {
         generationTask?.cancel()
     }
 
-    /// Warms the selected MLX model at launch when its files are already on disk,
+    /// Warms the selected local model at launch when its files are already on disk,
     /// so the first message streams immediately. No-op for Apple Intelligence.
     func preloadSelectedModelIfAvailable() {
         let id = selectedModelID
-        guard id != appleIntelligenceEngineID, modelStore.isDownloaded(id) else { return }
+        guard id != appleIntelligenceEngineID, modelStore.isAvailable(id) else { return }
         guard runtime.loadedModelID != id else { return }
         Task { [weak self] in
             _ = try? await self?.runtime.engine(for: id)
@@ -133,14 +136,14 @@ final class ChatController {
         let id = selectedModelID
         let name = selectedModelDisplayName
         if id == appleIntelligenceEngineID {
-            // Release any resident MLX weights right away — previously they
+            // Release any resident local weights right away — previously they
             // stayed in RAM until the idle auto-unload fired. Never yank
             // mid-stream: the in-flight generation still needs them.
             if !isStreaming { runtime.unloadCurrent() }
             showSwitchToast("Switched to \(name)")
             return
         }
-        guard modelStore.isDownloaded(id), !isStreaming else { return }
+        guard modelStore.isAvailable(id), !isStreaming else { return }
         if runtime.loadedModelID == id, case .ready = runtime.state {
             showSwitchToast("Switched to \(name)")
             return
@@ -186,6 +189,8 @@ final class ChatController {
         isInThinkPhase = false
         contentBuffer = ""
         thinkingBuffer = ""
+        contentCharacterCount = 0
+        thinkingCharacterCount = 0
 
         let defaults = UserDefaults.standard
         // The preset (including Custom, which owns the old "custom instructions"
@@ -241,6 +246,7 @@ final class ChatController {
                     switch event {
                     case .delta(let delta):
                         self.contentBuffer += delta
+                        self.contentCharacterCount += delta.count
                         if !sawContent {
                             sawContent = true
                             self.isInThinkPhase = false
@@ -250,12 +256,14 @@ final class ChatController {
                         }
                     case .thinkingDelta(let delta):
                         self.thinkingBuffer += delta
+                        self.thinkingCharacterCount += delta.count
                         if thinkStartedAt == nil {
                             thinkStartedAt = .now
                             self.isInThinkPhase = true
                         }
                     case .thinkingReclassified:
                         self.thinkingBuffer = ""
+                        self.thinkingCharacterCount = 0
                         assistant.thinkingSeconds = nil
                         self.isInThinkPhase = false
                     case .completed(let tokensPerSecond):
@@ -293,21 +301,49 @@ final class ChatController {
         generationTask = nil
     }
 
-    // MARK: - Throttled UI flush (<= 10 markdown re-parses per second)
+    // MARK: - Throttled UI flush
 
     private func startFlushLoop() {
         flushTask = Task { [weak self] in
             while !Task.isCancelled {
-                self?.flushBuffers()
-                try? await Task.sleep(for: .milliseconds(100))
+                guard let self else { return }
+                self.flushBuffers()
+                let visibleCharacters = max(
+                    self.contentCharacterCount,
+                    self.thinkingCharacterCount)
+                try? await Task.sleep(
+                    for: StreamingRenderPolicy.flushInterval(
+                        characterCount: visibleCharacters))
             }
         }
     }
 
     private func flushBuffers() {
         guard let message = activeMessage else { return }
-        if message.content != contentBuffer { message.content = contentBuffer }
+        var changed = false
+        if message.content != contentBuffer {
+            message.content = contentBuffer
+            changed = true
+        }
         let thinking = thinkingBuffer.isEmpty ? nil : thinkingBuffer
-        if message.thinking != thinking { message.thinking = thinking }
+        if message.thinking != thinking {
+            message.thinking = thinking
+            changed = true
+        }
+        if changed { transcriptRevision &+= 1 }
+    }
+}
+
+/// Parsing and laying out Markdown gets more expensive as an answer grows.
+/// Short replies retain the original low-latency cadence; long replies coalesce
+/// more tokens into each update instead of reparsing the whole transcript at 10 Hz.
+enum StreamingRenderPolicy {
+    static func flushInterval(characterCount: Int) -> Duration {
+        switch characterCount {
+        case ..<2_000: .milliseconds(100)
+        case ..<8_000: .milliseconds(180)
+        case ..<20_000: .milliseconds(260)
+        default: .milliseconds(350)
+        }
     }
 }

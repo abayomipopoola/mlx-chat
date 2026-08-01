@@ -6,25 +6,38 @@ struct ModelRow: View {
     @Environment(ChatController.self) private var chat
     let model: CatalogModel
     let onDelete: () -> Void
+    let onDownload: (() -> Void)?
+    let onSetupStreamed: (() -> Void)?
+
+    init(
+        model: CatalogModel,
+        onDelete: @escaping () -> Void,
+        onDownload: (() -> Void)? = nil,
+        onSetupStreamed: (() -> Void)? = nil
+    ) {
+        self.model = model
+        self.onDelete = onDelete
+        self.onDownload = onDownload
+        self.onSetupStreamed = onSetupStreamed
+    }
 
     private var store: ModelStore { chat.modelStore }
-
-    /// Non-nil when the on-disk model can't run in this build.
-    private var unsupportedReason: String? {
-        guard store.isDownloaded(model.id) else { return nil }
-        return store.unsupportedReason(for: model.id)
-    }
 
     var body: some View {
         // Snapshot per-model store values once so a progress tick for another
         // model does not re-read the shared dictionary inside the control.
-        let isDownloaded = store.isDownloaded(model.id)
-        let reason = unsupportedReason
+        let isAvailable = store.isAvailable(model.id)
+        let reason = isAvailable ? store.unsupportedReason(for: model.id) : nil
         let progress = store.downloadProgress[model.id]
+        let streamedRemovalKind = model.backend == .streamedMoE
+            ? store.streamedModelRemovalKind(for: model.id)
+            : nil
 
         HStack(spacing: 12) {
             TintedCircleIcon(
-                systemName: model.category == .coding
+                systemName: model.backend == .streamedMoE
+                    ? "externaldrive.fill"
+                    : model.category == .coding
                     ? "chevron.left.forwardslash.chevron.right"
                     : model.category == .reasoning ? "brain" : "message")
 
@@ -37,7 +50,7 @@ struct ModelRow: View {
                             .foregroundStyle(.secondary)
                     }
                     CapsuleBadge(text: model.quantLabel, tint: .iconBlue)
-                    CapsuleBadge(text: "\(model.ctxTokens / 1024)K ctx", tint: .iconPurple)
+                    CapsuleBadge(text: "\(model.runtimeContextTokens / 1024)K ctx", tint: .iconPurple)
                 }
                 Text(model.blurb)
                     .font(.subheadline)
@@ -49,8 +62,11 @@ struct ModelRow: View {
                         .foregroundStyle(Color.iconOrange)
                         .lineLimit(2)
                 }
-                Link(destination: model.hugginFaceURL) {
-                    Label("View on HuggingFace", systemImage: "link")
+                Link(destination: model.backend == .streamedMoE
+                    ? URL(string: "https://github.com/drumih/turbo-fieldfare#command-line-interface")!
+                    : model.hugginFaceURL) {
+                    Label(model.backend == .streamedMoE
+                        ? "About TurboFieldfare" : "View on HuggingFace", systemImage: "link")
                         .font(.caption)
                 }
                 .foregroundStyle(Color.brandGreen)
@@ -58,32 +74,43 @@ struct ModelRow: View {
 
             Spacer()
 
-            ModelDownloadControl(
-                modelID: model.id,
-                isDownloaded: isDownloaded,
+            ModelAvailabilityControl(
+                model: model,
+                isAvailable: isAvailable,
                 unsupportedReason: reason,
                 progress: progress,
-                onDelete: onDelete)
+                streamedRemovalKind: streamedRemovalKind,
+                onDelete: onDelete,
+                onDownload: onDownload,
+                onSetupStreamed: onSetupStreamed)
         }
         .padding(14)
         .background(Color.cardFill)
         .overlay(RoundedRectangle(cornerRadius: Studio.radiusCard).stroke(Color.cardStroke, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: Studio.radiusCard))
+        // Keep the row as an addressable container without replacing the
+        // identifiers on its nested download and removal buttons.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("modelRow.\(model.id)")
     }
 }
 
-/// Trailing download / progress / delete control for a model row.
+/// Trailing download, registration, progress, and removal control for a model row.
 /// Receives precomputed store values so it does not re-read the shared
 /// `downloadProgress` dictionary on every body evaluation.
-private struct ModelDownloadControl: View {
+private struct ModelAvailabilityControl: View {
     @Environment(ChatController.self) private var chat
-    let modelID: String
-    let isDownloaded: Bool
+    let model: CatalogModel
+    let isAvailable: Bool
     let unsupportedReason: String?
     let progress: Double?
+    let streamedRemovalKind: StreamedModelRemovalKind?
     let onDelete: () -> Void
+    let onDownload: (() -> Void)?
+    let onSetupStreamed: (() -> Void)?
 
     private var store: ModelStore { chat.modelStore }
+    private var modelID: String { model.id }
 
     var body: some View {
         if let fraction = progress {
@@ -104,9 +131,16 @@ private struct ModelDownloadControl: View {
             }
             .buttonStyle(.plain)
             .help("Cancel download")
-        } else if isDownloaded {
+            .accessibilityLabel("Cancel download for \(model.displayName)")
+            .accessibilityValue("\(Int(fraction * 100)) percent")
+        } else if isAvailable || streamedRemovalKind != nil {
             HStack(spacing: 8) {
-                if unsupportedReason != nil {
+                if !isAvailable, streamedRemovalKind == .managed {
+                    Image(systemName: "externaldrive.fill.badge.exclamationmark")
+                        .font(.title2)
+                        .foregroundStyle(Color.iconOrange)
+                        .help("Managed SSD files remain on disk but are not active")
+                } else if unsupportedReason != nil {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.title2)
                         .foregroundStyle(Color.iconOrange)
@@ -116,23 +150,81 @@ private struct ModelDownloadControl: View {
                         .font(.title2)
                         .foregroundStyle(Color.brandGreen)
                 }
+                if let onDownload,
+                   StreamedMoEInstall.supportsSSDStreaming(sourceModelID: modelID) {
+                    Button(action: onDownload) {
+                        Image(systemName: "externaldrive.badge.plus")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.iconBlue)
+                    .help("Add SSD-streamed version")
+                    .accessibilityLabel(
+                        "Add SSD-streamed version of \(model.displayName)")
+                    .accessibilityIdentifier("downloadModel.\(modelID)")
+                }
+                if model.backend == .streamedMoE, let onSetupStreamed {
+                    Button(action: onSetupStreamed) {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Manage streamed install")
+                    .accessibilityLabel(
+                        "Manage streamed install for \(model.displayName)")
+                }
                 Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
+                    Image(systemName: streamedRemovalKind == .external
+                        ? "xmark.circle" : "trash")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Delete download")
+                .help(removalHelp)
+                .accessibilityLabel(removalAccessibilityLabel)
+                .accessibilityIdentifier("removeModel.\(modelID)")
             }
         } else {
-            Button {
-                store.download(modelID)
-            } label: {
-                Image(systemName: "arrow.down.circle")
+            Button(action: startDownload) {
+                Image(systemName: model.backend == .streamedMoE
+                    ? "externaldrive.badge.plus" : "arrow.down.circle")
                     .font(.title2)
                     .foregroundStyle(Color.brandGreen)
             }
             .buttonStyle(.plain)
-            .help("Download")
+            .help(model.backend == .streamedMoE ? "Set up SSD model" : "Download")
+            .accessibilityLabel(model.backend == .streamedMoE
+                ? "Set up SSD model for \(model.displayName)"
+                : "Download \(model.displayName)")
+            .accessibilityIdentifier("downloadModel.\(modelID)")
+        }
+    }
+
+    private func startDownload() {
+        if model.backend == .streamedMoE {
+            if let onSetupStreamed {
+                onSetupStreamed()
+            } else {
+                store.installStreamedModel(modelID)
+            }
+        } else if let onDownload {
+            onDownload()
+        } else {
+            store.download(modelID)
+        }
+    }
+
+    private var removalHelp: String {
+        switch streamedRemovalKind {
+        case .managed: return "Move managed install to Trash"
+        case .external: return "Forget external install"
+        case nil: return "Delete download"
+        }
+    }
+
+    private var removalAccessibilityLabel: String {
+        switch streamedRemovalKind {
+        case .managed: return "Move \(model.displayName) to Trash"
+        case .external: return "Forget external install for \(model.displayName)"
+        case nil: return "Delete \(model.displayName) download"
         }
     }
 }
@@ -182,6 +274,7 @@ struct FamilyCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .accessibilityIdentifier("familyCard.\(family.id)")
     }
 }
 

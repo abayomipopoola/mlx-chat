@@ -1,10 +1,19 @@
 import Foundation
 
-/// A model the app can download and run. `id` is the HuggingFace repo id and doubles
-/// as the engine/model id everywhere (settings, picker, persistence).
+/// A model the app can download or register and run. Standard MLX model IDs are
+/// Hugging Face repository IDs; streamed installs use a stable app-local ID.
 struct CatalogModel: Identifiable, Hashable, Codable {
     enum Category: String, Codable {
         case general, coding, reasoning, imported
+    }
+
+    enum Backend: String, Codable {
+        /// Standard MLX / mlx-swift-lm loading. This remains the default for
+        /// existing persisted models and every dense model in the catalog.
+        case mlx
+        /// TurboFieldfare's MoE runtime. Common weights stay resident; routed
+        /// experts are fetched from a registered `.gturbo` directory.
+        case streamedMoE
     }
 
     let id: String
@@ -15,6 +24,7 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     let category: Category
     let blurb: String
     let extraEOSTokens: Set<String>
+    let backend: Backend
     /// How the model expresses chain-of-thought reasoning in its stream, or `nil`
     /// for a non-reasoning model. Drives both stream routing and the thinking toggle.
     let thinking: ThinkingConfig?
@@ -32,7 +42,8 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         blurb: String,
         extraEOSTokens: Set<String>,
         thinking: ThinkingConfig?,
-        supportsVision: Bool = false
+        supportsVision: Bool = false,
+        backend: Backend = .mlx
     ) {
         self.id = id
         self.displayName = displayName
@@ -42,6 +53,7 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         self.category = category
         self.blurb = blurb
         self.extraEOSTokens = extraEOSTokens
+        self.backend = backend
         self.thinking = thinking
         self.supportsVision = supportsVision
     }
@@ -56,6 +68,7 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         category = try c.decode(Category.self, forKey: .category)
         blurb = try c.decode(String.self, forKey: .blurb)
         extraEOSTokens = try c.decode(Set<String>.self, forKey: .extraEOSTokens)
+        backend = try c.decodeIfPresent(Backend.self, forKey: .backend) ?? .mlx
         thinking = try c.decodeIfPresent(ThinkingConfig.self, forKey: .thinking)
         supportsVision = try c.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
     }
@@ -66,6 +79,23 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     /// template kwarg (Qwen3 family, Ternary Bonsai, Gemma 4). R1 distills
     /// reason unconditionally.
     var supportsThinkingToggle: Bool { thinking?.toggleable == true }
+
+    /// TurboFieldfare's FP16 KV cache uses the SSD runtime setting (4K–32K).
+    /// The model supports 256K, but exposing that full cache would defeat the
+    /// low-memory backend. Dense MLX models keep their existing limit.
+    var runtimeContextTokens: Int {
+        backend == .streamedMoE ? StreamedMoEInstall.runtimeContextTokens : ctxTokens
+    }
+
+    /// Disambiguates the ordinary MLX checkpoint from its separately repacked
+    /// SSD-streamed install in the compact chat picker.
+    var pickerDisplayName: String {
+        if backend == .streamedMoE { return "SSD · \(displayName)" }
+        if StreamedMoEInstall.supportsSSDStreaming(sourceModelID: id) {
+            return "MLX · \(displayName)"
+        }
+        return displayName
+    }
 }
 
 /// How a model emits chain-of-thought reasoning inline in its output stream.
@@ -120,8 +150,12 @@ enum ModelCatalog {
     /// Display order of the family cards in Manage Models.
     static let families: [ModelFamily] = [
         ModelFamily(
+            id: "qwen36", name: "Qwen3.6", icon: "bubble.left.and.bubble.right",
+            blurb: "Qwen's 35B-A3B hybrid MoE model. Use standard MLX for vision or SSD streaming for a much smaller memory footprint.",
+            badges: [.new, .thinking, .recommended, .vision]),
+        ModelFamily(
             id: "qwen35", name: "Qwen3.5", icon: "bubble.left.and.bubble.right",
-            blurb: "The latest Qwen flagship generation. Strong all-round quality with thinking mode and 256K context.",
+            blurb: "A compact Qwen generation with strong all-round quality, thinking mode, and 256K context.",
             badges: [.new, .thinking, .recommended]),
         ModelFamily(
             id: "gemma4", name: "Gemma 4", icon: "bubble.left.and.bubble.right",
@@ -169,6 +203,7 @@ enum ModelCatalog {
     static func familyID(for model: CatalogModel) -> String {
         if model.category == .imported { return "imported" }
         let name = model.displayName
+        if name.hasPrefix("Qwen3.6") { return "qwen36" }
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
         if name.hasPrefix("Qwen3") { return "qwen3" }
         if name.hasPrefix("Qwen2.5 VL") { return "qwen25vl" }
@@ -184,6 +219,20 @@ enum ModelCatalog {
     /// Curated entries. Repos, sizes, `max_position_embeddings`, and MLX architecture
     /// support (LLMTypeRegistry at mlx-swift-lm 3.31.4) verified against HF/source.
     static let models: [CatalogModel] = [
+        CatalogModel(
+            id: StreamedMoEInstall.qwen36.sourceRepoID, displayName: "Qwen3.6 35B A3B",
+            sizeGB: 20.4, ctxTokens: 262_144, quantLabel: "4-bit MoE", category: .general,
+            blurb: "Hybrid MoE with about 3B active parameters. Use standard MLX or a separate low-memory SSD-streamed install.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            supportsVision: true),
+        CatalogModel(
+            id: StreamedMoEInstall.qwen36.modelID, displayName: "Qwen3.6 35B A3B",
+            sizeGB: 19.5, ctxTokens: 262_144, quantLabel: "4-bit · SSD", category: .general,
+            blurb: "Text-only Qwen MoE with a configurable context cache and SSD-streamed experts.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            backend: .streamedMoE),
         CatalogModel(
             id: "mlx-community/Qwen3.5-9B-4bit", displayName: "Qwen3.5 9B",
             sizeGB: 5.95, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
@@ -224,6 +273,28 @@ enum ModelCatalog {
             sizeGB: 6.74, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
             blurb: "Google's latest generation. Strong chat and reasoning with 256K context.",
             extraEOSTokens: [], thinking: .gemmaChannel, supportsVision: true),
+        CatalogModel(
+            id: StreamedMoEInstall.standard.sourceRepoID, displayName: "Gemma 4 26B A4B",
+            sizeGB: 14.3, ctxTokens: 262_144, quantLabel: "4-bit MoE", category: .general,
+            blurb: "Google's instruction-tuned MoE model. Download as standard MLX or opt into low-memory SSD streaming.",
+            extraEOSTokens: [], thinking: .gemmaChannel, supportsVision: true),
+        CatalogModel(
+            id: StreamedMoEInstall.standard.modelID, displayName: "Gemma 4 26B A4B",
+            sizeGB: 14.3, ctxTokens: 262_144, quantLabel: "4-bit · SSD", category: .general,
+            blurb: "MoE model with a configurable 4K–32K KV cache and SSD-streamed experts.",
+            extraEOSTokens: [], thinking: .gemmaChannel,
+            backend: .streamedMoE),
+        CatalogModel(
+            id: StreamedMoEInstall.qat.sourceRepoID, displayName: "Gemma 4 26B A4B QAT",
+            sizeGB: 14.5, ctxTokens: 262_144, quantLabel: "QAT 4-bit MoE", category: .general,
+            blurb: "Quantization-aware trained MoE checkpoint. Use standard MLX or a separate SSD-streamed install.",
+            extraEOSTokens: [], thinking: .gemmaChannel, supportsVision: true),
+        CatalogModel(
+            id: StreamedMoEInstall.qat.modelID, displayName: "Gemma 4 26B A4B QAT",
+            sizeGB: 14.5, ctxTokens: 262_144, quantLabel: "QAT 4-bit · SSD", category: .general,
+            blurb: "QAT MoE model with a configurable 4K–32K KV cache and SSD-streamed experts.",
+            extraEOSTokens: [], thinking: .gemmaChannel,
+            backend: .streamedMoE),
         CatalogModel(
             id: "mlx-community/gemma-4-12B-it-qat-4bit", displayName: "Gemma 4 12B QAT",
             sizeGB: 10.99, ctxTokens: 262_144, quantLabel: "QAT 4-bit", category: .general,
@@ -284,6 +355,7 @@ enum ModelCatalog {
             blurb: model.blurb,
             extraEOSTokens: model.extraEOSTokens.union(["<|im_end|>"]),
             thinking: .thinkTags(startsInside: true, toggleable: true),
-            supportsVision: model.supportsVision)
+            supportsVision: model.supportsVision,
+            backend: model.backend)
     }
 }

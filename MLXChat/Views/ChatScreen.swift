@@ -12,13 +12,12 @@ struct ChatScreen: View {
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
     @State private var atBottom = true
+    @State private var userPausedAutoScroll = false
+    @State private var userIsScrolling = false
     @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
 
-    private var messages: [ChatMessage] {
-        conversation?.orderedMessages ?? []
-    }
-
     var body: some View {
+        let messages = conversation?.orderedMessages ?? []
         VStack(spacing: 0) {
             if messages.isEmpty {
                 WelcomeView { template in
@@ -27,7 +26,7 @@ struct ChatScreen: View {
                     moveComposerCursorToEnd()
                 }
             } else {
-                transcript
+                transcript(messages: messages)
             }
             EngineReadinessNotice(selectedModelID: chat.selectedModelID)
             ComposerView(draft: $draft, focused: $composerFocused) { text, attachments in
@@ -38,31 +37,33 @@ struct ChatScreen: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             // Fixed header: opaque, so the transcript scrolls under it
             // instead of sliding past the model picker.
-            HStack(spacing: 8) {
-                // With the sidebar collapsed the traffic lights sit over the
-                // header's leading edge; the extra padding keeps the toggle
-                // clear. When the sidebar is open, the toggle and the settings
-                // gear live in the sidebar's top band instead.
-                if sidebarCollapsed {
-                    Button {
-                        sidebarCollapsed.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 34, height: 34)
-                            .glassEffect(.regular.interactive(), in: Circle())
-                            .contentShape(Circle())
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    // With the sidebar collapsed the traffic lights sit over the
+                    // header's leading edge; the extra padding keeps the toggle
+                    // clear. When the sidebar is open, the toggle and the settings
+                    // gear live in the sidebar's top band instead.
+                    if sidebarCollapsed {
+                        Button {
+                            sidebarCollapsed.toggle()
+                        } label: {
+                            Image(systemName: "sidebar.left")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 34, height: 34)
+                                .glassEffect(.regular.interactive(), in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show Sidebar (⌃⌘S)")
                     }
-                    .buttonStyle(.plain)
-                    .help("Show Sidebar (⌃⌘S)")
+                    Spacer()
+                    ModelPickerMenu()
+                    if chat.selectedModelSupportsThinking {
+                        ThinkingToggle()
+                    }
+                    PromptPresetMenu()
                 }
-                Spacer()
-                ModelPickerMenu()
-                if chat.selectedModelSupportsThinking {
-                    ThinkingToggle()
-                }
-                PromptPresetMenu()
             }
             .padding(.leading, sidebarCollapsed ? Studio.trafficLightClearance : 20)
             .padding(.trailing, 20)
@@ -92,24 +93,36 @@ struct ChatScreen: View {
         .animation(.easeOut(duration: 0.25), value: chat.switchToast)
         .onChange(of: conversation?.id) {
             atBottom = true
+            userPausedAutoScroll = false
+            userIsScrolling = false
             draft = ""
+        }
+        .onChange(of: chat.streamingMessageID) {
+            // Preserve an explicit user pause. A newly appended assistant row
+            // can make geometry report "not at bottom" for one layout pass;
+            // treating that transient state as intent is what caused bouncing.
+            if atBottom { userPausedAutoScroll = false }
         }
     }
 
-    private var transcriptFingerprint: String {
-        let last = messages.last
-        return "\(messages.count)|\(last?.content.count ?? 0)|\(last?.thinking?.count ?? 0)"
+    private func transcriptFingerprint(
+        for messages: [ChatMessage]
+    ) -> TranscriptFingerprint {
+        TranscriptFingerprint(
+            messageCount: messages.count,
+            lastMessageID: messages.last?.id,
+            renderRevision: chat.transcriptRevision)
     }
 
-    private var transcript: some View {
-        scrollBody
+    private func transcript(messages: [ChatMessage]) -> some View {
+        scrollBody(messages: messages)
             // Fresh scroll state per conversation: a reused ScrollView keeps the
             // previous chat's offset, which can land past the new (shorter)
             // content and show an apparently empty transcript until scrolled.
             .id(conversation?.id)
     }
 
-    private var scrollBody: some View {
+    private func scrollBody(messages: [ChatMessage]) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
@@ -128,13 +141,33 @@ struct ChatScreen: View {
             .accessibilityIdentifier("transcriptScrollView")
             .defaultScrollAnchor(.bottom)
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height
-                    >= geometry.contentSize.height - 60
+                Self.isNearBottom(geometry)
             } action: { _, nowAtBottom in
                 atBottom = nowAtBottom
+                if nowAtBottom {
+                    userPausedAutoScroll = false
+                } else if userIsScrolling {
+                    userPausedAutoScroll = true
+                }
             }
-            .onChange(of: transcriptFingerprint) {
-                if atBottom {
+            .onScrollPhaseChange { _, newPhase, context in
+                let isUserPhase = newPhase == .tracking
+                    || newPhase == .interacting
+                    || newPhase == .decelerating
+                if isUserPhase {
+                    userIsScrolling = true
+                    if !Self.isNearBottom(context.geometry) {
+                        userPausedAutoScroll = true
+                    }
+                } else if newPhase == .idle {
+                    if userIsScrolling {
+                        userPausedAutoScroll = !Self.isNearBottom(context.geometry)
+                    }
+                    userIsScrolling = false
+                }
+            }
+            .onChange(of: transcriptFingerprint(for: messages)) {
+                if atBottom || (chat.isStreaming && !userPausedAutoScroll) {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
@@ -142,18 +175,23 @@ struct ChatScreen: View {
                 if !atBottom {
                     Button {
                         atBottom = true
+                        userPausedAutoScroll = false
                         withAnimation { proxy.scrollTo("chat-bottom", anchor: .bottom) }
                     } label: {
                         Image(systemName: "arrow.down")
                             .padding(8)
-                            .background(.regularMaterial, in: Circle())
-                            .shadow(radius: 3)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
                     .padding(.bottom, 10)
                 }
             }
         }
+    }
+
+    private static func isNearBottom(_ geometry: ScrollGeometry) -> Bool {
+        geometry.contentOffset.y + geometry.containerSize.height
+            >= geometry.contentSize.height - 60
     }
 
     /// Programmatic focus selects the whole TextField content; collapse the
@@ -175,6 +213,12 @@ struct ChatScreen: View {
             image: attachments.imageData,
             attachment: attachments.attachment)
     }
+}
+
+private struct TranscriptFingerprint: Equatable {
+    let messageCount: Int
+    let lastMessageID: UUID?
+    let renderRevision: Int
 }
 
 /// Warns BEFORE sending when the selected engine cannot serve yet — on a

@@ -66,9 +66,15 @@ struct RootView: View {
                    let n = Int(arguments[index + 1]), conversations.indices.contains(n) {
                     selectedConversationID = conversations[n].id
                 }
-                // `--seed-demo` inserts a showcase conversation (markdown, LaTeX,
-                // code, thinking) for documentation screenshots, then selects it.
-                if arguments.contains("--seed-demo"), let store = chat.conversationStore {
+                // Deterministic content for screenshots and UI regressions.
+                if arguments.contains("--seed-markdown-regression"),
+                   let store = chat.conversationStore {
+                    selectedConversationID = DemoSeed.insertMarkdownRegression(using: store)
+                } else if arguments.contains("--seed-artifact-preview"),
+                   let store = chat.conversationStore {
+                    selectedConversationID = DemoSeed.insertArtifactPreview(using: store)
+                } else if arguments.contains("--seed-demo"),
+                          let store = chat.conversationStore {
                     selectedConversationID = DemoSeed.insert(using: store)
                 }
             }

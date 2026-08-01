@@ -126,7 +126,9 @@ struct MessageView: View {
         ForEach(MessageSegmenter.segment(message.content)) { block in
             switch block {
             case .markdown(_, let text):
-                Markdown(MarkdownContent(MathPreprocessor.preprocess(text)))
+                let renderedText = isStreamingThis
+                    ? text : MathPreprocessor.preprocess(text)
+                Markdown(MarkdownContent(renderedText))
                     .markdownTheme(.chat)
                     .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
                     .markdownInlineImageProvider(MathInlineProvider(fontSize: 15, color: mathColor))

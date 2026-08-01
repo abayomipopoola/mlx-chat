@@ -11,8 +11,44 @@ import Foundation
 enum MathPreprocessor {
     static func preprocess(_ markdown: String) -> String {
         // Math dressed up as a code fence renders as an equation instead.
-        let markdown = convertMathFences(markdown)
-        // Protect inline code spans: transform only the gaps between them.
+        let markdown = repairAccidentalIndentedMath(
+            convertMathFences(markdown))
+        // Protect fenced and indented code blocks before inline-code handling.
+        // Otherwise the generated swiftmath:// image syntax becomes visible
+        // source inside a Markdown code block.
+        return transformOutsideCodeBlocks(markdown)
+    }
+
+    private static func transformOutsideCodeBlocks(_ markdown: String) -> String {
+        guard hasPotentialCodeBlock(markdown) else {
+            return transformOutsideInlineCode(markdown)
+        }
+        var result = ""
+        var cursor = markdown.startIndex
+        for range in protectedCodeBlockRanges(in: markdown) {
+            result += transformOutsideInlineCode(String(markdown[cursor..<range.lowerBound]))
+            result += markdown[range]
+            cursor = range.upperBound
+        }
+        result += transformOutsideInlineCode(String(markdown[cursor...]))
+        return result
+    }
+
+    private static func hasPotentialCodeBlock(_ text: String) -> Bool {
+        text.contains("```")
+            || text.contains("~~~")
+            || hasPotentialIndentedLine(text)
+    }
+
+    private static func hasPotentialIndentedLine(_ text: String) -> Bool {
+        text.hasPrefix("    ")
+            || text.hasPrefix("\t")
+            || text.contains("\n    ")
+            || text.contains("\n\t")
+    }
+
+    private static func transformOutsideInlineCode(_ markdown: String) -> String {
+        // Transform only the gaps between inline code spans.
         let codeSpan = /(`{1,3})[^`]*?\1/
         var result = ""
         var cursor = markdown.startIndex
@@ -23,6 +59,222 @@ enum MathPreprocessor {
         }
         result += transform(String(markdown[cursor...]))
         return result
+    }
+
+    // MARK: - Code-block protection
+
+    private struct LineSlice {
+        let contentRange: Range<String.Index>
+        let fullRange: Range<String.Index>
+    }
+
+    private struct OpenFence {
+        let marker: Character
+        let minimumLength: Int
+        let start: String.Index
+    }
+
+    /// Finds CommonMark fenced and indented code regions. Math fences have
+    /// already been converted, so every range returned here must stay literal.
+    private static func protectedCodeBlockRanges(in text: String) -> [Range<String.Index>] {
+        var ranges: [Range<String.Index>] = []
+        var fence: OpenFence?
+        var indentedStart: String.Index?
+        var indentedEnd: String.Index?
+
+        for line in lineSlices(in: text) {
+            let content = text[line.contentRange]
+
+            if let currentFence = fence {
+                if isClosingFence(
+                    content,
+                    marker: currentFence.marker,
+                    minimumLength: currentFence.minimumLength)
+                {
+                    ranges.append(currentFence.start..<line.fullRange.upperBound)
+                    fence = nil
+                }
+                continue
+            }
+
+            if let start = indentedStart {
+                if content.trimmingCharacters(in: .whitespaces).isEmpty
+                    || isIndentedCodeLine(content)
+                {
+                    indentedEnd = line.fullRange.upperBound
+                    continue
+                }
+                ranges.append(start..<(indentedEnd ?? line.fullRange.lowerBound))
+                indentedStart = nil
+                indentedEnd = nil
+            }
+
+            if let opening = openingFence(in: content) {
+                fence = OpenFence(
+                    marker: opening.marker,
+                    minimumLength: opening.length,
+                    start: line.fullRange.lowerBound)
+            } else if !content.trimmingCharacters(in: .whitespaces).isEmpty,
+                      isIndentedCodeLine(content) {
+                indentedStart = line.fullRange.lowerBound
+                indentedEnd = line.fullRange.upperBound
+            }
+        }
+
+        if let fence {
+            ranges.append(fence.start..<text.endIndex)
+        } else if let indentedStart {
+            ranges.append(indentedStart..<(indentedEnd ?? text.endIndex))
+        }
+        return ranges
+    }
+
+    private static func lineSlices(in text: String) -> [LineSlice] {
+        var lines: [LineSlice] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let newline = text[start...].firstIndex(of: "\n")
+            let contentEnd = newline ?? text.endIndex
+            let fullEnd = newline.map { text.index(after: $0) } ?? text.endIndex
+            lines.append(LineSlice(
+                contentRange: start..<contentEnd,
+                fullRange: start..<fullEnd))
+            start = fullEnd
+        }
+        return lines
+    }
+
+    private static func openingFence(
+        in line: Substring
+    ) -> (marker: Character, length: Int)? {
+        var index = line.startIndex
+        var spaces = 0
+        while index < line.endIndex, line[index] == " ", spaces < 4 {
+            spaces += 1
+            index = line.index(after: index)
+        }
+        guard spaces <= 3, index < line.endIndex else { return nil }
+        let marker = line[index]
+        guard marker == "`" || marker == "~" else { return nil }
+        var length = 0
+        while index < line.endIndex, line[index] == marker {
+            length += 1
+            index = line.index(after: index)
+        }
+        guard length >= 3 else { return nil }
+        if marker == "`", line[index...].contains("`") { return nil }
+        return (marker, length)
+    }
+
+    private static func isClosingFence(
+        _ line: Substring,
+        marker: Character,
+        minimumLength: Int
+    ) -> Bool {
+        var index = line.startIndex
+        var spaces = 0
+        while index < line.endIndex, line[index] == " ", spaces < 4 {
+            spaces += 1
+            index = line.index(after: index)
+        }
+        guard spaces <= 3 else { return false }
+        var length = 0
+        while index < line.endIndex, line[index] == marker {
+            length += 1
+            index = line.index(after: index)
+        }
+        guard length >= minimumLength else { return false }
+        return line[index...].allSatisfy { $0 == " " || $0 == "\t" }
+    }
+
+    private static func isIndentedCodeLine(_ line: Substring) -> Bool {
+        line.first == "\t" || line.hasPrefix("    ")
+    }
+
+    // MARK: - Malformed-model repair
+
+    /// Models sometimes prefix prose or a bare LaTeX equation with four spaces,
+    /// which CommonMark treats as code. Repair only one indentation level and
+    /// only when the line is clearly math, leaving real code and list bodies
+    /// untouched.
+    private static func repairAccidentalIndentedMath(_ markdown: String) -> String {
+        guard hasPotentialIndentedLine(markdown) else { return markdown }
+        var lines = markdown.components(separatedBy: "\n")
+        var previousNonblank: String?
+        var fence: (marker: Character, minimumLength: Int)?
+
+        for index in lines.indices {
+            let original = lines[index]
+            let line = Substring(original)
+            if let currentFence = fence {
+                if isClosingFence(
+                    line,
+                    marker: currentFence.marker,
+                    minimumLength: currentFence.minimumLength)
+                {
+                    fence = nil
+                }
+                continue
+            }
+            if let opening = openingFence(in: line) {
+                fence = (opening.marker, opening.length)
+                continue
+            }
+
+            let originalTrimmed = original.trimmingCharacters(in: .whitespaces)
+            defer {
+                if !originalTrimmed.isEmpty { previousNonblank = originalTrimmed }
+            }
+
+            guard let dedented = removeSingleCodeIndent(from: original),
+                  previousNonblank?.wholeMatch(
+                    of: /(?:[-+*]|[0-9]+[.)])[ \t]+.*/
+                  ) == nil
+            else { continue }
+
+            let candidate = dedented.trimmingCharacters(in: .whitespaces)
+            guard !candidate.isEmpty, !looksLikeSourceCode(candidate) else { continue }
+
+            if transform(candidate) != candidate {
+                lines[index] = dedented
+            } else if looksLikeBareLatexEquation(candidate) {
+                lines[index] = "$$\(candidate)$$"
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func removeSingleCodeIndent(from line: String) -> String? {
+        if line.hasPrefix("\t") {
+            let result = String(line.dropFirst())
+            return result.first == "\t" || result.hasPrefix("    ") ? nil : result
+        }
+        guard line.hasPrefix("    ") else { return nil }
+        let result = String(line.dropFirst(4))
+        return result.first == " " || result.first == "\t" ? nil : result
+    }
+
+    private static func looksLikeSourceCode(_ line: String) -> Bool {
+        let prefixes = [
+            "let ", "var ", "func ", "class ", "struct ", "enum ",
+            "import ", "return ", "if ", "for ", "while ", "switch ",
+            "case ", "print(", "#", "//", "/*", "<",
+        ]
+        return prefixes.contains { line.hasPrefix($0) }
+            || line.contains("\"")
+            || line.contains("`")
+            || line.hasSuffix(";")
+    }
+
+    private static func looksLikeBareLatexEquation(_ line: String) -> Bool {
+        let commands = [
+            "\\frac", "\\sum", "\\prod", "\\int", "\\lim", "\\left",
+            "\\right", "\\sqrt", "\\infty", "\\to", "\\cdot", "\\times",
+            "\\nabla", "\\epsilon", "\\theta", "\\mathbb", "\\mathrm",
+            "\\begin", "\\end",
+        ]
+        guard commands.contains(where: { line.contains($0) }) else { return false }
+        return line.contains("=") || line.first == "\\"
     }
 
     /// Models sometimes emit equations inside fences. Two shapes are rescued:
@@ -72,9 +324,9 @@ enum MathPreprocessor {
             guard latex.contains(/[\\^_{}<>]/) else { return String(match.0) }
             return inlineImage(stripBoxed(latex))
         }
-        // Bare \boxed{X} with no math delimiters — models often end the final
-        // answer with it, and cmark would otherwise print the command literally.
-        output = replaceBareBoxed(output)
+        // `transform` only receives slices outside code blocks, so bare boxed
+        // expressions can be converted directly without scanning for fences again.
+        output = convertBareBoxed(output)
         return output
     }
 
@@ -108,22 +360,6 @@ enum MathPreprocessor {
     private static func inlineMath(_ latex: String) -> String {
         if let boxed = boxedContent(latex) { return boxedInlineImage(boxed) }
         return inlineImage(stripBoxed(latex))
-    }
-
-    /// Replaces bare `\boxed{X}` occurrences with boxed inline images, skipping
-    /// fenced code blocks (inside code it's content, not math). Runs after the
-    /// delimiter rules, so only delimiter-less occurrences remain.
-    private static func replaceBareBoxed(_ text: String) -> String {
-        var result = ""
-        var cursor = text.startIndex
-        let fence = /(?m)^(`{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/
-        for match in text.matches(of: fence) {
-            result += convertBareBoxed(String(text[cursor..<match.range.lowerBound]))
-            result += text[match.range]
-            cursor = match.range.upperBound
-        }
-        result += convertBareBoxed(String(text[cursor...]))
-        return result
     }
 
     private static func convertBareBoxed(_ text: String) -> String {

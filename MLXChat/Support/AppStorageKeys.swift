@@ -14,10 +14,15 @@ enum Keys {
     static let thinkingEnabled = "thinking.enabled"
     static let downloadedModels = "downloadedModels"
     static let customModels = "customModels"
+    static let streamedModelBookmarks = "streamedModelBookmarks"
+    static let managedStreamedModelEnabled = "streamedModel.managed.enabled"
+    static let managedStreamedModelPreferences = "streamedModel.managed.preferences"
+    static let streamedModelContextTokens = "streamedModel.runtime.contextTokens"
+    static let streamedModelExpertCacheSlots = "streamedModel.runtime.expertCacheSlots"
 
     enum Defaults {
         /// Apple Intelligence: the only engine guaranteed present on a fresh
-        /// install. A downloaded model becomes the selection only when the
+        /// install. A local model becomes the selection only when the
         /// user picks it, and that choice persists across launches.
         static let selectedModelID = appleIntelligenceEngineID
         static let personalizationEnabled = true
@@ -28,6 +33,8 @@ enum Keys {
         static let appearance = "system"
         static let sidebarCollapsed = false
         static let thinkingEnabled = true
+        static let streamedModelContextTokens = 4_096
+        static let streamedModelExpertCacheSlots = 16
     }
 }
 

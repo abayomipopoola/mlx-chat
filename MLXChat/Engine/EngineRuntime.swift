@@ -19,7 +19,7 @@ final class EngineRuntime {
 
     private let modelStore: ModelStore
     private let appleEngine = AppleIntelligenceEngine()
-    private var mlxEngine: MLXEngine?
+    private var modelEngine: ChatEngine?
     /// nonisolated(unsafe): written once in init, read in (nonisolated) deinit.
     private nonisolated(unsafe) var unloadTimer: Timer?
 
@@ -36,7 +36,7 @@ final class EngineRuntime {
         unloadTimer?.invalidate()
     }
 
-    /// Loaded MLX model id, if any.
+    /// Loaded local model id, if any.
     var loadedModelID: String? {
         switch state {
         case .empty: return nil
@@ -50,10 +50,10 @@ final class EngineRuntime {
             if let message = AppleIntelligenceEngine.availabilityMessage() {
                 throw EngineError.unavailable(message)
             }
-            // Switching to Apple Intelligence releases any resident MLX weights
+            // Switching to Apple Intelligence releases any resident local weights
             // — except mid-generation, where the stream still needs them (the
             // idle auto-unload or a later resolve reclaims them after).
-            if mlxEngine != nil, !isGenerating { unloadCurrent() }
+            if modelEngine != nil, !isGenerating { unloadCurrent() }
             return appleEngine
         }
 
@@ -61,12 +61,12 @@ final class EngineRuntime {
             throw EngineError.generationFailed("Unknown model: \(id)")
         }
 
-        // One MLX model in RAM at a time.
-        if let current = mlxEngine, current.id != id {
+        // One local model backend in RAM at a time.
+        if let current = modelEngine, current.id != id {
             unloadCurrent()
         }
 
-        if !modelStore.isDownloaded(id) {
+        if !modelStore.isAvailable(id) {
             state = .downloading(id: id)
             do {
                 try await modelStore.downloadAndWait(id)
@@ -76,15 +76,31 @@ final class EngineRuntime {
             }
         }
 
-        // Reject configs this build can't run (unknown architecture or
-        // out-of-range affine quant) before mlx C traps on quantize.
-        if let reason = ModelSupport.unsupportedReason(modelID: id) {
+        // MLX-only preflight: the streamed MoE backend validates its `.gturbo`
+        // manifest instead. Dense and imported MLX behavior stays unchanged.
+        if catalogModel.backend == .mlx,
+           let reason = ModelSupport.unsupportedReason(modelID: id) {
             state = .empty
             throw EngineError.unavailable("\(catalogModel.displayName) can't run in this build: \(reason).")
         }
 
-        let engine = mlxEngine ?? MLXEngine(model: catalogModel)
-        mlxEngine = engine
+        let engine: ChatEngine
+        if let current = modelEngine {
+            engine = current
+        } else {
+            switch catalogModel.backend {
+            case .mlx:
+                engine = MLXEngine(model: catalogModel)
+            case .streamedMoE:
+                guard let directory = modelStore.availableDirectory(for: id) else {
+                    state = .empty
+                    throw EngineError.unavailable(
+                        "Choose this model’s completed .gturbo directory in Manage Models.")
+                }
+                engine = StreamedMoEEngine(model: catalogModel, modelDirectory: directory)
+            }
+            modelEngine = engine
+        }
 
         if !engine.isLoaded {
             state = .loading(id: id, fraction: 0)
@@ -97,7 +113,7 @@ final class EngineRuntime {
                     }
                 }
             } catch {
-                mlxEngine = nil
+                modelEngine = nil
                 state = .empty
                 throw error
             }
@@ -117,16 +133,26 @@ final class EngineRuntime {
         lastUsedAt = .now
     }
 
-    /// True while an MLX model owns the in-RAM slot for an active stream.
+    /// True while a local model owns the in-RAM slot for an active stream.
     private var isGenerating: Bool {
         if case .generating = state { return true }
         return false
     }
 
     func unloadCurrent() {
-        mlxEngine?.unload()
-        mlxEngine = nil
+        modelEngine?.unload()
+        modelEngine = nil
         state = .empty
+    }
+
+    /// Runtime settings shape the KV buffers and expert cache at load time.
+    /// Drop only a resident streamed engine so its next load uses new values;
+    /// dense MLX and Apple Intelligence remain untouched.
+    func streamedModelSettingsDidChange() {
+        guard !isGenerating,
+              let id = loadedModelID,
+              modelStore.model(for: id)?.backend == .streamedMoE else { return }
+        unloadCurrent()
     }
 
     /// Called when a model's files are deleted from disk.

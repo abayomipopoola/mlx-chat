@@ -120,3 +120,50 @@ struct ThinkTagFilter {
         }
     }
 }
+
+enum ThinkingPreference {
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: Keys.thinkingEnabled) as? Bool
+            ?? Keys.Defaults.thinkingEnabled
+    }
+}
+
+extension ThinkingConfig {
+    func makeFilter(enabled: Bool, preopened: Bool = false) -> ThinkTagFilter {
+        guard enabled else { return ThinkTagFilter() }
+        let beginsInside = startsInside || preopened
+        return ThinkTagFilter(
+            open: open,
+            close: close,
+            startsInside: beginsInside,
+            mayEmit: !beginsInside)
+    }
+}
+
+/// Maps one thinking filter into the engine event contract. Both local model
+/// backends use this so close-marker handling and reclassification stay equal.
+struct ThinkingEventRouter {
+    private var filter: ThinkTagFilter
+
+    init(filter: ThinkTagFilter) {
+        self.filter = filter
+    }
+
+    mutating func consume(_ text: String, emit: (EngineEvent) -> Void) {
+        guard !text.isEmpty else { return }
+        let routed = filter.consume(text)
+        if !routed.thinking.isEmpty { emit(.thinkingDelta(routed.thinking)) }
+        if !routed.content.isEmpty { emit(.delta(routed.content)) }
+    }
+
+    mutating func finish(emit: (EngineEvent) -> Void) {
+        let flush = filter.finish()
+        if flush.reclassified {
+            if !flush.content.isEmpty { emit(.delta(flush.content)) }
+            emit(.thinkingReclassified)
+        } else {
+            if !flush.thinking.isEmpty { emit(.thinkingDelta(flush.thinking)) }
+            if !flush.content.isEmpty { emit(.delta(flush.content)) }
+        }
+    }
+}

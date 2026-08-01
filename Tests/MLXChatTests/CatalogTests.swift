@@ -68,7 +68,39 @@ import Testing
             """
         let model = try JSONDecoder().decode(CatalogModel.self, from: Data(legacy.utf8))
         #expect(model.supportsVision == false)
+        #expect(model.backend == .mlx)
         #expect(model.id == "mlx-community/Old-Model-4bit")
+    }
+
+    @Test func allPinnedMoEVariantsUseStreamedMoEBackend() {
+        for variant in StreamedMoEInstall.variants {
+            let streamed = ModelCatalog.model(for: variant.modelID)
+            #expect(streamed?.backend == .streamedMoE)
+            #expect(StreamedMoERuntimeSettings.allowedContextTokens.contains(
+                streamed?.runtimeContextTokens ?? 0))
+            #expect(streamed?.ctxTokens == 262_144)
+            #expect(streamed?.supportsVision == false)
+        }
+
+        let dense = ModelCatalog.model(for: "mlx-community/gemma-4-12B-it-4bit")
+        #expect(dense?.backend == .mlx)
+        #expect(dense?.runtimeContextTokens == dense?.ctxTokens)
+    }
+
+    @Test func streamedInstallAndOrdinaryMLXCheckpointHaveDistinctIdentities() {
+        for variant in StreamedMoEInstall.variants {
+            let streamed = ModelCatalog.model(for: variant.modelID)
+            let ordinary = ModelCatalog.model(for: variant.sourceRepoID)
+
+            #expect(variant.modelID != variant.sourceRepoID)
+            #expect(streamed?.backend == .streamedMoE)
+            #expect(ordinary?.backend == .mlx)
+            #expect(streamed?.id != ordinary?.id)
+            #expect(streamed?.pickerDisplayName.hasPrefix("SSD ·") == true)
+            #expect(ordinary?.pickerDisplayName.hasPrefix("MLX ·") == true)
+            #expect(StreamedMoEInstall.supportsSSDStreaming(
+                sourceModelID: ordinary?.id ?? ""))
+        }
     }
 
     @Test func visionCatalogModelRoundTripsSupportsVision() throws {
@@ -94,5 +126,19 @@ import Testing
         let model = ModelCatalog.model(for: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
         #expect(model?.supportsVision == true)
         #expect(model.map { ModelCatalog.familyID(for: $0) } == "qwen25vl")
+    }
+
+    @Test func qwen36OffersVisionMLXAndTextOnlySSDIdentities() {
+        let mlx = ModelCatalog.model(for: StreamedMoEInstall.qwen36.sourceRepoID)
+        let ssd = ModelCatalog.model(for: StreamedMoEInstall.qwen36.modelID)
+
+        #expect(mlx?.backend == .mlx)
+        #expect(mlx?.supportsVision == true)
+        #expect(mlx.map { ModelCatalog.familyID(for: $0) } == "qwen36")
+        #expect(ssd?.backend == .streamedMoE)
+        #expect(ssd?.supportsVision == false)
+        #expect(ssd?.supportsThinkingToggle == true)
+        #expect(mlx?.pickerDisplayName == "MLX · Qwen3.6 35B A3B")
+        #expect(ssd?.pickerDisplayName == "SSD · Qwen3.6 35B A3B")
     }
 }

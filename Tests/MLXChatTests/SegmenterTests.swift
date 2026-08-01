@@ -92,4 +92,15 @@ import Testing
         #expect(artifact.content == "<p>x</p>\n``\ninside still")
         #expect(after.contains("After"))
     }
+
+    @Test func longStreamingRepliesUseAnAdaptiveRenderCadence() {
+        #expect(StreamingRenderPolicy.flushInterval(characterCount: 0)
+            == .milliseconds(100))
+        #expect(StreamingRenderPolicy.flushInterval(characterCount: 2_000)
+            == .milliseconds(180))
+        #expect(StreamingRenderPolicy.flushInterval(characterCount: 8_000)
+            == .milliseconds(260))
+        #expect(StreamingRenderPolicy.flushInterval(characterCount: 20_000)
+            == .milliseconds(350))
+    }
 }

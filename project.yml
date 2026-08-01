@@ -14,6 +14,8 @@ packages:
   SwiftTransformers:
     url: https://github.com/huggingface/swift-transformers
     from: 1.3.0
+  TurboFieldfare:
+    path: Vendor/TurboFieldfare
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     from: 2.4.1
@@ -53,9 +55,10 @@ targets:
         PRODUCT_NAME: MLX Chat
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
-        MARKETING_VERSION: 1.1.0
-        CURRENT_PROJECT_VERSION: 4
+        MARKETING_VERSION: 1.2.0
+        CURRENT_PROJECT_VERSION: 5
         SWIFT_VERSION: "5.0"
+        ARCHS: arm64
         CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: NO
         CODE_SIGN_ENTITLEMENTS: MLXChat/Support/MLXChat.entitlements
@@ -89,6 +92,14 @@ targets:
         product: HuggingFace
       - package: SwiftTransformers
         product: Tokenizers
+      - package: TurboFieldfare
+        product: TurboFieldfare
+      - package: TurboFieldfare
+        product: TurboFieldfareRepack
+        link: false
+        embed: true
+        copy:
+          destination: executables
       - package: MarkdownUI
         product: MarkdownUI
       - package: Highlightr

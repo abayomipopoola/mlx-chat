@@ -14,15 +14,15 @@ final class ImportSheetUITests: MLXUITestCase {
         app.launch()
         // Models route may hide the chat header; wait for the import row.
         XCTAssertTrue(
-            app.descendants(matching: .any)["importModelRow"]
+            app.descendants(matching: .any)["addModelRow"]
                 .waitForExistence(timeout: 15),
-            "app should boot to Manage Models with the import row")
+            "app should boot to Manage Models with the add-model row")
     }
 
     func testImportButtonCheapGateAndNoOpBareHFURL() {
-        let importRow = app.descendants(matching: .any)["importModelRow"]
-        XCTAssertTrue(importRow.waitForExistence(timeout: 3))
-        importRow.click()
+        let addRow = app.descendants(matching: .any)["addModelRow"]
+        XCTAssertTrue(addRow.waitForExistence(timeout: 3))
+        addRow.click()
 
         XCTAssertTrue(app.staticTexts["Import Custom Model"].waitForExistence(timeout: 3),
                       "import sheet should present")

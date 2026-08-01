@@ -1,7 +1,7 @@
 import Foundation
 
-struct EngineMessage {
-    enum Role { case user, assistant }
+struct EngineMessage: Sendable {
+    enum Role: Sendable { case user, assistant }
     let role: Role
     let text: String
     /// Downscaled JPEG image payloads for the pending user turn (VLM only).
@@ -15,7 +15,7 @@ struct EngineMessage {
     }
 }
 
-enum EngineEvent {
+enum EngineEvent: Sendable {
     case delta(String)
     case thinkingDelta(String)
     /// The whole response turned out to be an unclosed think block: the caller must
@@ -24,7 +24,7 @@ enum EngineEvent {
     case completed(tokensPerSecond: Double?)
 }
 
-enum EngineError: LocalizedError {
+enum EngineError: LocalizedError, Sendable {
     case unavailable(String)
     case contextExceeded(String)
     case generationFailed(String)
@@ -37,10 +37,11 @@ enum EngineError: LocalizedError {
     }
 }
 
-/// One chat backend (Apple Intelligence, or one MLX model).
+/// One chat backend (Apple Intelligence, MLX, or the streamed MoE runtime).
 /// `history` always ends with the pending user message.
 protocol ChatEngine: AnyObject {
     var id: String { get }
+    var isLoaded: Bool { get }
     /// RAM load only; downloads happen in EngineRuntime before this. Idempotent.
     func load(progress: @escaping @Sendable (Double) -> Void) async throws
     func unload()

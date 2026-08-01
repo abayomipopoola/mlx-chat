@@ -43,6 +43,44 @@ import Testing
         #expect(MathPreprocessor.preprocess(input) == input)
     }
 
+    @Test func mathInsideFencedCodeIsUntouched() {
+        let input = """
+            ```swift
+            let formula = "$x_1$"
+            ```
+            """
+        #expect(MathPreprocessor.preprocess(input) == input)
+    }
+
+    @Test func mathInsideIntentionalIndentedCodeIsUntouched() {
+        let input = "    print(\"$x_1$\")"
+        #expect(MathPreprocessor.preprocess(input) == input)
+    }
+
+    @Test func accidentallyIndentedMathProseDoesNotExposeProviderURLsAsCode() {
+        let input = """
+                The first term converges to $F(n)=\\frac{3}{4}+\\epsilon_n$.
+                The second term converges to $0$ because $\\epsilon_n\\to0$.
+            """
+        let output = MathPreprocessor.preprocess(input)
+
+        #expect(output.contains("The first term converges to "))
+        #expect(output.contains("swiftmath://i/"))
+        #expect(!output.split(separator: "\n").contains(where: {
+            $0.hasPrefix("    ") && $0.contains("swiftmath://")
+        }))
+    }
+
+    @Test func accidentallyIndentedBareLatexBecomesDisplayMath() {
+        let latex = "F(n) = \\frac{1}{2} \\left(1 + \\frac{1}{n}\\right)"
+        let output = MathPreprocessor.preprocess("    \(latex)")
+
+        #expect(output.contains("swiftmath://d/"))
+        #expect(payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == latex)
+        #expect(!output.contains("    F(n)"))
+    }
+
     @Test func escapedParensBecomeInlineImage() {
         let output = MathPreprocessor.preprocess("Solve \\(x_1\\) now")
         #expect(output.contains("swiftmath://i/"))

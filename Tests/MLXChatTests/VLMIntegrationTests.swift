@@ -10,7 +10,7 @@ struct VLMIntegrationTests {
     @Test(.timeLimit(.minutes(20)))
     func vlmAnswersAboutImage() async throws {
         let modelID = "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
-        guard ModelStore.localModelDirectory(for: modelID) != nil else {
+        guard ModelStore.localMLXModelDirectory(for: modelID) != nil else {
             print("Skipping VLMIntegrationTests: weights not present for \(modelID)")
             return
         }
@@ -61,7 +61,7 @@ struct VLMIntegrationTests {
     @Test(.timeLimit(.minutes(20)))
     func vlmGemma4AnswersAboutImage() async throws {
         let modelID = "mlx-community/gemma-4-12B-it-4bit"
-        guard ModelStore.localModelDirectory(for: modelID) != nil else {
+        guard ModelStore.localMLXModelDirectory(for: modelID) != nil else {
             print("Skipping VLMIntegrationTests: weights not present for \(modelID)")
             return
         }
@@ -112,7 +112,7 @@ struct VLMIntegrationTests {
     @Test(.timeLimit(.minutes(20)))
     func vlmGemma4TextOnlyTurn() async throws {
         let modelID = "mlx-community/gemma-4-12B-it-4bit"
-        guard ModelStore.localModelDirectory(for: modelID) != nil else {
+        guard ModelStore.localMLXModelDirectory(for: modelID) != nil else {
             print("Skipping VLMIntegrationTests: weights not present for \(modelID)")
             return
         }

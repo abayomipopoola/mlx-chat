@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// In-content model picker capsule: Apple Intelligence + downloaded models only.
+/// In-content model picker capsule: Apple Intelligence + available local models.
 /// Toggles the root-hosted model dropdown (see WindowDropdown): the panel can
 /// not live in a per-button overlay because the header's `.safeAreaInset` bar
 /// clips its content to the bar region.
@@ -68,9 +68,9 @@ struct ModelPickerPanel: View {
     /// Pushes the in-frame Models page onto the detail column.
     let onManageModels: () -> Void
 
-    private var downloadedModels: [CatalogModel] {
+    private var localModels: [CatalogModel] {
         chat.modelStore.allModels.filter {
-            chat.modelStore.isDownloaded($0.id)
+            chat.modelStore.isAvailable($0.id)
                 && chat.modelStore.unsupportedReason(for: $0.id) == nil
         }
     }
@@ -88,7 +88,7 @@ struct ModelPickerPanel: View {
                 modelRow(id: appleIntelligenceEngineID, name: "Apple Intelligence", resident: false)
             }
 
-            if !downloadedModels.isEmpty {
+            if !localModels.isEmpty {
                 if AppleIntelligenceEngine.isAvailable {
                     // Separator under the Apple Intelligence row, as the old
                     // AppKit menu drew between the plain item and the section;
@@ -105,10 +105,10 @@ struct ModelPickerPanel: View {
                     .foregroundStyle(.secondary)
                     .padding(.leading, 20)
                     .padding(.top, 4)
-                ForEach(downloadedModels) { model in
+                ForEach(localModels) { model in
                     modelRow(
                         id: model.id,
-                        name: model.displayName,
+                        name: model.pickerDisplayName,
                         resident: chat.runtime.loadedModelID == model.id)
                 }
             }
@@ -179,7 +179,7 @@ struct ModelPickerPanel: View {
         .padding(.vertical, 3)
     }
 
-    /// Frees the resident MLX model and falls back to Apple Intelligence.
+    /// Frees the resident local model and falls back to Apple Intelligence.
     /// (The selection didSet already unloads via warmSwitchedModel;
     /// unloadCurrent is the idempotent guarantee.)
     private func eject() {

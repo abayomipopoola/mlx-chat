@@ -134,7 +134,7 @@ private struct ManageModelsRow: View {
                 Text("Manage Models")
                     .font(Studio.rowTitle)
                 Spacer()
-                Text("\(chat.modelStore.downloadedCount) downloaded")
+                Text("\(chat.modelStore.localModelCount) local")
                     .foregroundStyle(.secondary)
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))

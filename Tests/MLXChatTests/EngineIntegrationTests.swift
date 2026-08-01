@@ -17,7 +17,7 @@ struct EngineIntegrationTests {
 
         let store = await ModelStore()
         try await store.downloadAndWait(modelID)
-        #expect(await store.isDownloaded(modelID))
+        #expect(await store.isAvailable(modelID))
 
         let engine = MLXEngine(model: catalogModel)
         try await engine.load { _ in }

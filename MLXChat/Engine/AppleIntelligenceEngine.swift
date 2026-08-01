@@ -4,6 +4,7 @@ import FoundationModels
 /// Built-in Apple Intelligence engine (FoundationModels, macOS 26).
 final class AppleIntelligenceEngine: ChatEngine {
     let id = appleIntelligenceEngineID
+    let isLoaded = true
 
     /// nil when the model is ready to use; otherwise a user-facing reason.
     static func availabilityMessage() -> String? {

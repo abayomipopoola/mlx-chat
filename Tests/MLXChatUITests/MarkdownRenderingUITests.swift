@@ -54,4 +54,30 @@ final class MarkdownRenderingUITests: XCTestCase {
             XCTFail("boxed formula should render inline with its lead-in text")
         }
     }
+
+    func testMalformedIndentedMathRendersWithoutRawProviderLinksOrLatex() {
+        app.terminate()
+        app = XCUIApplication()
+        app.launchArguments = ["--sidebar-expanded", "--seed-markdown-regression"]
+        app.launch()
+
+        let transcript = app.scrollViews["transcriptScrollView"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15), "transcript scroll view")
+
+        let repairedProse = transcript.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@",
+            "The first term converges to", "The first term converges to"))
+        XCTAssertTrue(repairedProse.firstMatch.waitForExistence(timeout: 5),
+                      "indented math prose should render as prose")
+
+        let leakedProviderURL = transcript.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "swiftmath://", "swiftmath://"))
+        XCTAssertFalse(leakedProviderURL.firstMatch.waitForExistence(timeout: 1),
+                       "internal math-provider URLs must never be visible")
+
+        let leakedLatex = transcript.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "\\frac", "\\frac"))
+        XCTAssertFalse(leakedLatex.firstMatch.waitForExistence(timeout: 1),
+                       "a bare indented equation should render as math, not source")
+    }
 }

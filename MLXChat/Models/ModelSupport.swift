@@ -145,7 +145,7 @@ enum ModelSupport {
 
     /// Same check by model id; nil when the model isn't on disk.
     static func unsupportedReason(modelID: String) -> String? {
-        guard let directory = ModelStore.localModelDirectory(for: modelID) else {
+        guard let directory = ModelStore.localMLXModelDirectory(for: modelID) else {
             return nil
         }
         return unsupportedReason(directory: directory)

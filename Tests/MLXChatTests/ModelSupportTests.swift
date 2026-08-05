@@ -61,9 +61,14 @@ import MLXVLM
         #expect(ModelSupport.unsupportedReason(configJSON: json("not json")) != nil)
     }
 
-    @Test(arguments: ["llama", "qwen3", "qwen3_5", "bitnet", "gemma4", "mistral", "qwen2_5_vl"])
+    @Test(arguments: ["llama", "qwen3", "qwen3_5", "bitnet", "gemma4", "lfm2", "mistral", "qwen2_5_vl"])
     func registryCornerstonesAreListed(_ type: String) {
         #expect(ModelSupport.supportedModelTypes.contains(type))
+    }
+
+    @Test func lfm25ConfigIsLoadable() {
+        let config = #"{"model_type":"lfm2","rope_parameters":{"rope_theta":10000000},"quantization":{"group_size":64,"bits":4,"mode":"affine"}}"#
+        #expect(ModelSupport.unsupportedReason(configJSON: json(config)) == nil)
     }
 
     /// Drift guard: the static list must stay in sync with the registries of the

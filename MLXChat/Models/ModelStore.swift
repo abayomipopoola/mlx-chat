@@ -281,10 +281,11 @@ final class ModelStore {
         }
         lastError = nil
         downloadProgress[id] = 0
+        let sourceSubfolder = model(for: id)?.sourceSubfolder
         let task = Task { [weak self] in
             do {
                 try await SnapshotDownloader.download(
-                    repoID: id, destination: destination,
+                    repoID: id, subfolder: sourceSubfolder, destination: destination,
                     onProgress: { fraction in
                         Task { @MainActor in
                             self?.downloadProgress[id] = fraction

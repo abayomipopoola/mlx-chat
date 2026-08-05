@@ -31,6 +31,9 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     /// True when the model can accept image inputs (VLM). Persisted; legacy
     /// UserDefaults entries without the key decode as `false`.
     let supportsVision: Bool
+    /// Optional folder inside the Hugging Face repository that should be
+    /// downloaded and flattened into the app's local model directory.
+    let sourceSubfolder: String?
 
     init(
         id: String,
@@ -43,7 +46,8 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         extraEOSTokens: Set<String>,
         thinking: ThinkingConfig?,
         supportsVision: Bool = false,
-        backend: Backend = .mlx
+        backend: Backend = .mlx,
+        sourceSubfolder: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -56,6 +60,7 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         self.backend = backend
         self.thinking = thinking
         self.supportsVision = supportsVision
+        self.sourceSubfolder = sourceSubfolder
     }
 
     init(from decoder: Decoder) throws {
@@ -71,9 +76,13 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         backend = try c.decodeIfPresent(Backend.self, forKey: .backend) ?? .mlx
         thinking = try c.decodeIfPresent(ThinkingConfig.self, forKey: .thinking)
         supportsVision = try c.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
+        sourceSubfolder = try c.decodeIfPresent(String.self, forKey: .sourceSubfolder)
     }
 
-    var hugginFaceURL: URL { URL(string: "https://huggingface.co/\(id)")! }
+    var hugginFaceURL: URL {
+        let suffix = sourceSubfolder.map { "/tree/main/\($0)" } ?? ""
+        return URL(string: "https://huggingface.co/\(id)\(suffix)")!
+    }
 
     /// Reasoning can be switched off per turn via the model's `enable_thinking`
     /// template kwarg (Qwen3 family, Ternary Bonsai, Gemma 4). R1 distills
@@ -150,6 +159,10 @@ enum ModelCatalog {
     /// Display order of the family cards in Manage Models.
     static let families: [ModelFamily] = [
         ModelFamily(
+            id: "lfm25", name: "LFM2.5", icon: "brain.head.profile",
+            blurb: "Liquid AI's compact 2.6B reasoning model with a 128K context window.",
+            badges: [.new, .thinking, .recommended]),
+        ModelFamily(
             id: "qwen36", name: "Qwen3.6", icon: "bubble.left.and.bubble.right",
             blurb: "Qwen's 35B-A3B hybrid MoE model. Use standard MLX for vision or SSD streaming for a much smaller memory footprint.",
             badges: [.new, .thinking, .recommended, .vision]),
@@ -203,6 +216,7 @@ enum ModelCatalog {
     static func familyID(for model: CatalogModel) -> String {
         if model.category == .imported { return "imported" }
         let name = model.displayName
+        if name.hasPrefix("LFM2.5") { return "lfm25" }
         if name.hasPrefix("Qwen3.6") { return "qwen36" }
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
         if name.hasPrefix("Qwen3") { return "qwen3" }
@@ -219,6 +233,19 @@ enum ModelCatalog {
     /// Curated entries. Repos, sizes, `max_position_embeddings`, and MLX architecture
     /// support (LLMTypeRegistry at mlx-swift-lm 3.31.4) verified against HF/source.
     static let models: [CatalogModel] = [
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX", displayName: "LFM2.5 2.6B",
+            sizeGB: 1.60, ctxTokens: 131_072, quantLabel: "4-bit · LiquidAI", category: .general,
+            blurb: "Official compact reasoning model, optimized for fast on-device use.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "4bit"),
+        CatalogModel(
+            id: "mlx-community/LFM2.5-2.6B-bf16", displayName: "LFM2.5 2.6B BF16",
+            sizeGB: 5.39, ctxTokens: 131_072, quantLabel: "BF16 · mlx-community", category: .general,
+            blurb: "Full-precision LFM2.5 checkpoint for maximum quality.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false)),
         CatalogModel(
             id: StreamedMoEInstall.qwen36.sourceRepoID, displayName: "Qwen3.6 35B A3B",
             sizeGB: 20.4, ctxTokens: 262_144, quantLabel: "4-bit MoE", category: .general,

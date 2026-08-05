@@ -13,7 +13,8 @@ import Foundation
 /// the library's download path entirely.
 enum SnapshotDownloader {
     struct RemoteFile: Sendable {
-        let path: String
+        let remotePath: String
+        let localPath: String
         let size: Int64
     }
 
@@ -40,7 +41,7 @@ enum SnapshotDownloader {
 
     /// Lists the repo's files at `main` via the public tree API. The `size` field
     /// carries the resolved LFS size, so it doubles as the progress weight.
-    static func listFiles(repoID: String) async throws -> [RemoteFile] {
+    static func listFiles(repoID: String, subfolder: String? = nil) async throws -> [RemoteFile] {
         guard var components = URLComponents(
             string: "https://huggingface.co/api/models/\(repoID)/tree/main") else {
             throw DownloadError.listFailed("bad repository id")
@@ -55,8 +56,28 @@ enum SnapshotDownloader {
         struct Entry: Decodable { let path: String; let type: String; let size: Int64? }
         let entries = try JSONDecoder().decode([Entry].self, from: data)
         return entries
-            .filter { $0.type == "file" && isWanted($0.path) }
-            .map { RemoteFile(path: $0.path, size: $0.size ?? 0) }
+            .compactMap { entry -> RemoteFile? in
+                guard entry.type == "file",
+                      let localPath = localPath(for: entry.path, subfolder: subfolder) else {
+                    return nil
+                }
+                return RemoteFile(
+                    remotePath: entry.path,
+                    localPath: localPath,
+                    size: entry.size ?? 0)
+            }
+    }
+
+    /// Selects one repository folder and removes that prefix locally. This lets
+    /// repositories such as LiquidAI/LFM2.5-2.6B-MLX expose several precision
+    /// folders while the MLX loader still sees config and weights at its root.
+    static func localPath(for remotePath: String, subfolder: String?) -> String? {
+        guard isWanted(remotePath) else { return nil }
+        guard let subfolder, !subfolder.isEmpty else { return remotePath }
+        let prefix = subfolder.hasSuffix("/") ? subfolder : subfolder + "/"
+        guard remotePath.hasPrefix(prefix) else { return nil }
+        let localPath = String(remotePath.dropFirst(prefix.count))
+        return localPath.isEmpty ? nil : localPath
     }
 
     /// Downloads all wanted files into `destination` (a plain `~/Models/<org>/<name>`
@@ -69,10 +90,11 @@ enum SnapshotDownloader {
     /// time out entirely).
     static func download(
         repoID: String,
+        subfolder: String? = nil,
         destination: URL,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws {
-        let files = try await listFiles(repoID: repoID)
+        let files = try await listFiles(repoID: repoID, subfolder: subfolder)
         guard !files.isEmpty else { throw DownloadError.noFiles }
         let totalBytes = max(files.reduce(Int64(0)) { $0 + $1.size }, 1)
 
@@ -86,7 +108,7 @@ enum SnapshotDownloader {
         var completedBytes: Int64 = 0
         for file in files {
             try Task.checkCancellation()
-            let fileURL = staging.appendingPathComponent(file.path)
+            let fileURL = staging.appendingPathComponent(file.localPath)
 
             // Resume across restarts / re-clicks: a fully staged file is reused.
             if file.size > 0,
@@ -98,8 +120,8 @@ enum SnapshotDownloader {
             }
 
             guard let src = URL(
-                string: "https://huggingface.co/\(repoID)/resolve/main/\(file.path)") else {
-                throw DownloadError.fileFailed(path: file.path, detail: "bad file url")
+                string: "https://huggingface.co/\(repoID)/resolve/main/\(file.remotePath)") else {
+                throw DownloadError.fileFailed(path: file.remotePath, detail: "bad file url")
             }
             let base = completedBytes
             let fileSize = file.size

@@ -141,4 +141,28 @@ import Testing
         #expect(mlx?.pickerDisplayName == "MLX · Qwen3.6 35B A3B")
         #expect(ssd?.pickerDisplayName == "SSD · Qwen3.6 35B A3B")
     }
+
+    @Test func lfm25CatalogOffersOfficial4BitAndCommunityBF16() {
+        let official = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX")
+        let community = ModelCatalog.model(for: "mlx-community/LFM2.5-2.6B-bf16")
+
+        #expect(official?.sourceSubfolder == "4bit")
+        #expect(official?.ctxTokens == 131_072)
+        #expect(official?.thinking?.startsInside == true)
+        #expect(official?.supportsThinkingToggle == false)
+        #expect(official.map { ModelCatalog.familyID(for: $0) } == "lfm25")
+        #expect(community?.sourceSubfolder == nil)
+        #expect(community?.ctxTokens == 131_072)
+        #expect(community?.thinking?.startsInside == true)
+        #expect(community.map { ModelCatalog.familyID(for: $0) } == "lfm25")
+    }
+
+    @Test func catalogModelSourceSubfolderRoundTrips() throws {
+        let original = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX")!
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(CatalogModel.self, from: data)
+
+        #expect(decoded.sourceSubfolder == "4bit")
+        #expect(decoded.hugginFaceURL.absoluteString.hasSuffix("/tree/main/4bit"))
+    }
 }

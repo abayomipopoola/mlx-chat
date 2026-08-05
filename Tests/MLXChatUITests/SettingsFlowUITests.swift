@@ -69,6 +69,27 @@ final class SettingsFlowUITests: MLXUITestCase {
             "Opening Imported should reset the overview scroll position and reveal its models")
     }
 
+    func testLFMFamilyOffersSupportedPrecisionsAndDisablesUnsupportedFormats() {
+        app.buttons["settingsGearButton"].click()
+        let manageRow = app.descendants(matching: .any)["manageModelsRow"]
+        XCTAssertTrue(manageRow.waitForExistence(timeout: 3))
+        manageRow.click()
+
+        let family = app.descendants(matching: .any)["familyCard.lfm25"]
+        XCTAssertTrue(family.waitForExistence(timeout: 3))
+        family.click()
+
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "downloadModel.LiquidAI/LFM2.5-2.6B-MLX@5bit"
+        ].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "modelRow.LiquidAI/LFM2.5-2.6B-MLX@mxfp4"
+        ].exists)
+        XCTAssertFalse(app.descendants(matching: .any)[
+            "downloadModel.LiquidAI/LFM2.5-2.6B-MLX@mxfp4"
+        ].exists)
+    }
+
     private func assertSSDOption(
         for modelID: String,
         familyID: String = "gemma4"

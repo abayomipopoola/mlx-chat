@@ -51,6 +51,12 @@ final class MLXEngine: ChatEngine {
         // overload would drop them and Qwen models would run past <|im_end|>.
         let configuration: ModelConfiguration
         if let localDirectory = ModelStore.localMLXModelDirectory(for: model.id) {
+            do {
+                try ModelWeightNormalizer.normalizeIfNeeded(in: localDirectory)
+            } catch {
+                throw EngineError.generationFailed(
+                    "Couldn't prepare the model weights: \(error.localizedDescription)")
+            }
             configuration = ModelConfiguration(
                 directory: localDirectory, extraEOSTokens: model.extraEOSTokens)
         } else {

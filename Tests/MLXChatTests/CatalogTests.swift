@@ -69,6 +69,8 @@ import Testing
         let model = try JSONDecoder().decode(CatalogModel.self, from: Data(legacy.utf8))
         #expect(model.supportsVision == false)
         #expect(model.backend == .mlx)
+        #expect(model.sourceRepoID == nil)
+        #expect(model.installRestriction == nil)
         #expect(model.id == "mlx-community/Old-Model-4bit")
     }
 
@@ -142,9 +144,14 @@ import Testing
         #expect(ssd?.pickerDisplayName == "SSD · Qwen3.6 35B A3B")
     }
 
-    @Test func lfm25CatalogOffersOfficial4BitAndCommunityBF16() {
+    @Test func lfm25CatalogOffersEveryOfficialPrecisionAndCommunityBF16() {
         let official = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX")
         let community = ModelCatalog.model(for: "mlx-community/LFM2.5-2.6B-bf16")
+        let officialVariants = ModelCatalog.models.filter {
+            $0.huggingFaceRepoID == "LiquidAI/LFM2.5-2.6B-MLX"
+        }
+        let supported = officialVariants.filter { $0.installRestriction == nil }
+        let restricted = officialVariants.filter { $0.installRestriction != nil }
 
         #expect(official?.sourceSubfolder == "4bit")
         #expect(official?.ctxTokens == 131_072)
@@ -155,14 +162,18 @@ import Testing
         #expect(community?.ctxTokens == 131_072)
         #expect(community?.thinking?.startsInside == true)
         #expect(community.map { ModelCatalog.familyID(for: $0) } == "lfm25")
+        #expect(officialVariants.count == 8)
+        #expect(Set(supported.compactMap(\.sourceSubfolder)) == ["4bit", "5bit", "6bit", "8bit", "bf16"])
+        #expect(Set(restricted.compactMap(\.sourceSubfolder)) == ["mxfp4", "mxfp8", "nvfp4"])
     }
 
-    @Test func catalogModelSourceSubfolderRoundTrips() throws {
-        let original = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX")!
+    @Test func catalogModelVariantSourceRoundTrips() throws {
+        let original = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX@5bit")!
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(CatalogModel.self, from: data)
 
-        #expect(decoded.sourceSubfolder == "4bit")
-        #expect(decoded.hugginFaceURL.absoluteString.hasSuffix("/tree/main/4bit"))
+        #expect(decoded.sourceSubfolder == "5bit")
+        #expect(decoded.sourceRepoID == "LiquidAI/LFM2.5-2.6B-MLX")
+        #expect(decoded.hugginFaceURL.absoluteString.hasSuffix("/tree/main/5bit"))
     }
 }

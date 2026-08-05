@@ -28,6 +28,16 @@ final class DropdownRegressionUITests: MLXUITestCase {
                       "settings gear should live in the sidebar's top band")
     }
 
+    func testAvailableUpdateShowsGreenInstallControlInSidebar() {
+        app.terminate()
+        app.launchArguments = ["--sidebar-expanded", "--seed-update-available"]
+        app.launch()
+
+        let update = app.buttons["installUpdateButton"]
+        XCTAssertTrue(update.waitForExistence(timeout: 15))
+        XCTAssertEqual(update.label, "Install MLX Chat 9.9.9")
+    }
+
     // MARK: - Model dropdown
 
     func testModelDropdownOpensWithMenuContent() {

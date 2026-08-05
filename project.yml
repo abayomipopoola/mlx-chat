@@ -56,7 +56,7 @@ targets:
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
         MARKETING_VERSION: 1.2.1
-        CURRENT_PROJECT_VERSION: 6
+        CURRENT_PROJECT_VERSION: 7
         SWIFT_VERSION: "5.0"
         ARCHS: arm64
         CODE_SIGN_IDENTITY: "-"
@@ -141,3 +141,6 @@ schemes:
     test:
       config: Debug
       targets: [MLXChatTests, MLXChatUITests]
+      environmentVariables:
+        MLXCHAT_RUN_LFM_SMOKE: "$(MLXCHAT_RUN_LFM_SMOKE)"
+        MLXCHAT_LFM_MODEL_IDS: "$(MLXCHAT_LFM_MODEL_IDS)"

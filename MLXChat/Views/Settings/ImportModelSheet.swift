@@ -120,7 +120,7 @@ private struct RepoInputCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Model ID or URL")
                 .font(.system(size: 13, weight: .semibold))
-            TextField("mlx-community/ModelName-4bit", text: $input)
+            TextField("ModelAuthor/ModelName-MLX", text: $input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13).monospaced())
                 .padding(.horizontal, 10)
@@ -131,7 +131,7 @@ private struct RepoInputCard: View {
                 .focused(isFocused)
                 .onSubmit(onSubmit)
                 .accessibilityIdentifier("importRepoField")
-            Text("Examples: mlx-community/Qwen2-VL-7B-4bit or a full HuggingFace URL")
+            Text("Example: LiquidAI/LFM2.5-2.6B-MLX or a full Hugging Face URL")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let errorMessage {
@@ -158,11 +158,11 @@ private struct ImportRiskCard: View {
                 bullet("May consume significant storage space")
                 bullet("Could crash or perform poorly on your device")
             }
-            Text("Only import models from trusted sources. Look for models in the **mlx-community** organization for best compatibility.")
+            Text("Only import models from trusted sources. Official authors and **mlx-community** both publish compatible MLX checkpoints.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Link(destination: URL(string: "https://huggingface.co/mlx-community")!) {
-                Label("Browse MLX Models on HuggingFace", systemImage: "globe")
+            Link(destination: URL(string: "https://huggingface.co/models?library=mlx")!) {
+                Label("Browse MLX Models on Hugging Face", systemImage: "globe")
                     .font(.caption.weight(.semibold))
             }
             .foregroundStyle(Color.brandGreen)

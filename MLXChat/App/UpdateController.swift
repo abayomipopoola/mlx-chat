@@ -23,6 +23,12 @@ final class UpdateController: NSObject, SPUUpdaterDelegate {
 
     override init() {
         super.init()
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--seed-update-available") {
+            availableVersion = "9.9.9"
+            return
+        }
+#endif
         guard Self.isConfigured else { return }
         controller = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)

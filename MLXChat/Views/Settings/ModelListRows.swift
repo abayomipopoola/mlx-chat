@@ -27,7 +27,8 @@ struct ModelRow: View {
         // Snapshot per-model store values once so a progress tick for another
         // model does not re-read the shared dictionary inside the control.
         let isAvailable = store.isAvailable(model.id)
-        let reason = isAvailable ? store.unsupportedReason(for: model.id) : nil
+        let reason = model.installRestriction
+            ?? (isAvailable ? store.unsupportedReason(for: model.id) : nil)
         let progress = store.downloadProgress[model.id]
         let streamedRemovalKind = model.backend == .streamedMoE
             ? store.streamedModelRemovalKind(for: model.id)
@@ -182,6 +183,12 @@ private struct ModelAvailabilityControl: View {
                 .accessibilityLabel(removalAccessibilityLabel)
                 .accessibilityIdentifier("removeModel.\(modelID)")
             }
+        } else if let unsupportedReason {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundStyle(Color.iconOrange)
+                .help(unsupportedReason)
+                .accessibilityLabel("Unavailable: \(unsupportedReason)")
         } else {
             Button(action: startDownload) {
                 Image(systemName: model.backend == .streamedMoE

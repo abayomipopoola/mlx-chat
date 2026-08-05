@@ -271,6 +271,10 @@ final class ModelStore {
             installStreamedModel(id)
             return
         }
+        if let restriction = model(for: id)?.installRestriction {
+            lastError = restriction
+            return
+        }
         // Downloads land in the plain `~/Models/<org>/<name>` layout, which
         // `localMLXModelDirectory` resolves first, so the load path finds them offline
         // and never falls back to the (broken) library `.id` downloader. See
@@ -281,11 +285,13 @@ final class ModelStore {
         }
         lastError = nil
         downloadProgress[id] = 0
-        let sourceSubfolder = model(for: id)?.sourceSubfolder
+        let sourceModel = model(for: id)
+        let sourceSubfolder = sourceModel?.sourceSubfolder
+        let sourceRepoID = sourceModel?.huggingFaceRepoID ?? id
         let task = Task { [weak self] in
             do {
                 try await SnapshotDownloader.download(
-                    repoID: id, subfolder: sourceSubfolder, destination: destination,
+                    repoID: sourceRepoID, subfolder: sourceSubfolder, destination: destination,
                     onProgress: { fraction in
                         Task { @MainActor in
                             self?.downloadProgress[id] = fraction
@@ -408,7 +414,7 @@ final class ModelStore {
         let trimmed = repoID.trimmingCharacters(in: .whitespaces)
         let pattern = /^[\w.\-]+\/[\w.\-]+$/
         guard trimmed.wholeMatch(of: pattern) != nil, HuggingFace.Repo.ID(rawValue: trimmed) != nil else {
-            return "Enter a repo id like mlx-community/ModelName-4bit."
+            return "Enter a repo id like ModelAuthor/ModelName-MLX."
         }
         guard allModels.first(where: { $0.id == trimmed }) == nil else {
             return "This model is already in the list."

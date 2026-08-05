@@ -206,7 +206,7 @@ struct ModelsPage: View {
         ModelRow(
             model: model,
             onDelete: { deleteCandidate = model },
-            onDownload: model.backend == .mlx
+            onDownload: model.backend == .mlx && model.installRestriction == nil
                 ? {
                     presentedSheet = .download(
                         model: model,
@@ -329,7 +329,7 @@ private struct ModelsOverview: View {
             }
         }
 
-        Link(destination: URL(string: "https://huggingface.co/mlx-community")!) {
+        Link(destination: URL(string: "https://huggingface.co/models?library=mlx")!) {
             Label("Browse MLX models on Hugging Face", systemImage: "globe")
                 .font(.callout)
         }

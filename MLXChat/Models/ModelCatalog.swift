@@ -34,6 +34,12 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     /// Optional folder inside the Hugging Face repository that should be
     /// downloaded and flattened into the app's local model directory.
     let sourceSubfolder: String?
+    /// Hugging Face repository to download when `id` is an app-local variant
+    /// identity such as `owner/repo@5bit`. Nil means the id is the repo id.
+    let sourceRepoID: String?
+    /// Non-nil when the catalog should show a known variant but must not offer
+    /// its download with the MLX runtime linked into this build.
+    let installRestriction: String?
 
     init(
         id: String,
@@ -47,7 +53,9 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         thinking: ThinkingConfig?,
         supportsVision: Bool = false,
         backend: Backend = .mlx,
-        sourceSubfolder: String? = nil
+        sourceSubfolder: String? = nil,
+        sourceRepoID: String? = nil,
+        installRestriction: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -61,6 +69,8 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         self.thinking = thinking
         self.supportsVision = supportsVision
         self.sourceSubfolder = sourceSubfolder
+        self.sourceRepoID = sourceRepoID
+        self.installRestriction = installRestriction
     }
 
     init(from decoder: Decoder) throws {
@@ -77,11 +87,15 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         thinking = try c.decodeIfPresent(ThinkingConfig.self, forKey: .thinking)
         supportsVision = try c.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
         sourceSubfolder = try c.decodeIfPresent(String.self, forKey: .sourceSubfolder)
+        sourceRepoID = try c.decodeIfPresent(String.self, forKey: .sourceRepoID)
+        installRestriction = try c.decodeIfPresent(String.self, forKey: .installRestriction)
     }
+
+    var huggingFaceRepoID: String { sourceRepoID ?? id }
 
     var hugginFaceURL: URL {
         let suffix = sourceSubfolder.map { "/tree/main/\($0)" } ?? ""
-        return URL(string: "https://huggingface.co/\(id)\(suffix)")!
+        return URL(string: "https://huggingface.co/\(huggingFaceRepoID)\(suffix)")!
     }
 
     /// Reasoning can be switched off per turn via the model's `enable_thinking`
@@ -234,12 +248,64 @@ enum ModelCatalog {
     /// support (LLMTypeRegistry at mlx-swift-lm 3.31.4) verified against HF/source.
     static let models: [CatalogModel] = [
         CatalogModel(
-            id: "LiquidAI/LFM2.5-2.6B-MLX", displayName: "LFM2.5 2.6B",
-            sizeGB: 1.60, ctxTokens: 131_072, quantLabel: "4-bit · LiquidAI", category: .general,
+            id: "LiquidAI/LFM2.5-2.6B-MLX", displayName: "LFM2.5 2.6B 4-bit",
+            sizeGB: 1.47, ctxTokens: 131_072, quantLabel: "4-bit · LiquidAI", category: .general,
             blurb: "Official compact reasoning model, optimized for fast on-device use.",
             extraEOSTokens: ["<|im_end|>"],
             thinking: .thinkTags(startsInside: true, toggleable: false),
             sourceSubfolder: "4bit"),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@5bit", displayName: "LFM2.5 2.6B 5-bit",
+            sizeGB: 1.76, ctxTokens: 131_072, quantLabel: "5-bit · LiquidAI", category: .general,
+            blurb: "Official 5-bit precision for a small quality increase over 4-bit.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "5bit", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX"),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@6bit", displayName: "LFM2.5 2.6B 6-bit",
+            sizeGB: 2.04, ctxTokens: 131_072, quantLabel: "6-bit · LiquidAI", category: .general,
+            blurb: "Official 6-bit precision balancing memory use and fidelity.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "6bit", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX"),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@8bit", displayName: "LFM2.5 2.6B 8-bit",
+            sizeGB: 2.67, ctxTokens: 131_072, quantLabel: "8-bit · LiquidAI", category: .general,
+            blurb: "Official high-fidelity quantized checkpoint.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "8bit", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX"),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@bf16", displayName: "LFM2.5 2.6B BF16",
+            sizeGB: 5.02, ctxTokens: 131_072, quantLabel: "BF16 · LiquidAI", category: .general,
+            blurb: "Official full-precision checkpoint for maximum fidelity.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "bf16", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX"),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@mxfp4", displayName: "LFM2.5 2.6B MXFP4",
+            sizeGB: 1.46, ctxTokens: 131_072, quantLabel: "MXFP4 · LiquidAI", category: .general,
+            blurb: "Official microscaling FP4 checkpoint.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "mxfp4", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX",
+            installRestriction: "MXFP4 isn't supported by the MLX Swift runtime in this build."),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@mxfp8", displayName: "LFM2.5 2.6B MXFP8",
+            sizeGB: 2.59, ctxTokens: 131_072, quantLabel: "MXFP8 · LiquidAI", category: .general,
+            blurb: "Official microscaling FP8 checkpoint.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "mxfp8", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX",
+            installRestriction: "MXFP8 isn't supported by the MLX Swift runtime in this build."),
+        CatalogModel(
+            id: "LiquidAI/LFM2.5-2.6B-MLX@nvfp4", displayName: "LFM2.5 2.6B NVFP4",
+            sizeGB: 1.53, ctxTokens: 131_072, quantLabel: "NVFP4 · LiquidAI", category: .general,
+            blurb: "Official NVIDIA FP4 checkpoint.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            sourceSubfolder: "nvfp4", sourceRepoID: "LiquidAI/LFM2.5-2.6B-MLX",
+            installRestriction: "NVFP4 isn't supported by the MLX Swift runtime in this build."),
         CatalogModel(
             id: "mlx-community/LFM2.5-2.6B-bf16", displayName: "LFM2.5 2.6B BF16",
             sizeGB: 5.39, ctxTokens: 131_072, quantLabel: "BF16 · mlx-community", category: .general,

@@ -55,8 +55,8 @@ targets:
         PRODUCT_NAME: MLX Chat
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
-        MARKETING_VERSION: 1.2.1
-        CURRENT_PROJECT_VERSION: 7
+        MARKETING_VERSION: 1.2.2
+        CURRENT_PROJECT_VERSION: 8
         SWIFT_VERSION: "5.0"
         ARCHS: arm64
         CODE_SIGN_IDENTITY: "-"

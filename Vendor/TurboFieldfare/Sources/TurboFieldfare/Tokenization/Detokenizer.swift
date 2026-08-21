@@ -10,11 +10,23 @@ import Tokenizers
 /// 2. swift-transformers' decoder silently drops byte-fallback tokens that sit
 ///    at the **end** of the decoded sequence (the bytes are committed only once
 ///    a non-byte-fallback token follows). For us this matters at `flush()`.
+/// 3. Byte-level BPE vocabularies (ChatML/Qwen/Ornith) split rare codepoints
+///    without using the `<0xNN>` spelling, so `isByteFallback` cannot see them.
+///    The library decodes such a half-finished tail through
+///    `String(decoding:as: UTF8.self)`, which turns it into U+FFFD. Emitting
+///    that placeholder is unrecoverable: the next token completes the codepoint,
+///    the freshly decoded prefix no longer matches what we already emitted, and
+///    the real character is lost. Ornith 1.5 has no whole-character token for
+///    `⇔ ⟺ ∨ ≡`, so every one of them used to reach the transcript as `\u{FFFD}`.
 ///
 /// Strategy:
 ///   - During `push(_:)` we decode the longest prefix of accumulated IDs that
 ///     does NOT end with byte-fallback tokens, then emit the delta vs. previously
 ///     emitted text. Any trailing byte-fallback IDs are held back.
+///   - A trailing run of U+FFFD is held back too, for as long as it stays
+///     trailing. That covers challenge 3 without needing to know the vocabulary
+///     spelling: once the codepoint completes, the placeholder disappears from
+///     the decode and the real character is emitted in its place.
 ///   - During `flush()` we decode the stable prefix as above AND manually
 ///     assemble the trailing byte-fallback bytes into a UTF-8 string. This
 ///     recovers text the library would otherwise drop on a sequence-ending
@@ -23,7 +35,7 @@ struct GFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
-    @usableFromInline var emitted: String = ""
+    @usableFromInline var cursor = GFEmitCursor()
 
     init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
@@ -44,31 +56,26 @@ struct GFDetokenizer {
         stableIDs.append(tokenID)
 
         let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(current)
+        return commitDelta(GFEmitCursor.holdingTrailingReplacements(current))
     }
 
     mutating func flush() -> String {
-        let stableText = stableIDs.isEmpty
+        let decoded = stableIDs.isEmpty
             ? ""
             : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
+        // The stream is over, so a still-incomplete codepoint is never going to
+        // arrive. Drop the placeholder rather than show it. Trim before joining
+        // the byte-fallback tail, or the tail would make the placeholder
+        // non-trailing and the trim would miss it.
+        let stableText = GFEmitCursor.holdingTrailingReplacements(decoded)
 
         let trailingText = assembleByteFallback(trailingByteIDs)
-        let fullText = stableText + trailingText
-        return commitDelta(fullText)
+        return commitDelta(stableText + trailingText)
     }
 
     @usableFromInline
     mutating func commitDelta(_ current: String) -> String {
-        guard current.hasPrefix(emitted) else {
-            // Decoder altered the prefix — extremely rare in append-only streams.
-            // Resync rather than emit garbage; the user-visible loss is bounded
-            // to whatever was retokenized.
-            emitted = current
-            return ""
-        }
-        let delta = String(current.dropFirst(emitted.count))
-        emitted = current
-        return delta
+        cursor.commit(current)
     }
 
     @usableFromInline

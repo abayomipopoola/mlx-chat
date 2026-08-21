@@ -55,8 +55,8 @@ targets:
         PRODUCT_NAME: MLX Chat
         PRODUCT_MODULE_NAME: MLXChat
         PRODUCT_BUNDLE_IDENTIFIER: org.mlxchat.MLXChat
-        MARKETING_VERSION: 1.2.2
-        CURRENT_PROJECT_VERSION: 8
+        MARKETING_VERSION: 1.2.3
+        CURRENT_PROJECT_VERSION: 9
         SWIFT_VERSION: "5.0"
         ARCHS: arm64
         CODE_SIGN_IDENTITY: "-"
@@ -121,6 +121,8 @@ targets:
       - target: MLXChat
       - package: MLXSwiftLM
         product: MLXVLM
+      - package: TurboFieldfare
+        product: TurboFieldfare
   MLXChatUITests:
     type: bundle.ui-testing
     platform: macOS

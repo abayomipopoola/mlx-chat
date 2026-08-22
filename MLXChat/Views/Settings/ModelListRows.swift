@@ -47,19 +47,19 @@ struct ModelRow: View {
                     Text(model.displayName).font(Studio.rowTitle)
                     if model.sizeGB > 0 {
                         Text(String(format: "%.1f GB", model.sizeGB))
-                            .font(.caption)
+                            .font(Studio.sans(10))
                             .foregroundStyle(.secondary)
                     }
                     CapsuleBadge(text: model.quantLabel, tint: .iconBlue)
                     CapsuleBadge(text: "\(model.runtimeContextTokens / 1024)K ctx", tint: .iconPurple)
                 }
                 Text(model.blurb)
-                    .font(.subheadline)
+                    .font(Studio.sans(11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 if let reason {
                     Text(reason)
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(Color.iconOrange)
                         .lineLimit(2)
                 }
@@ -68,7 +68,7 @@ struct ModelRow: View {
                     : model.hugginFaceURL) {
                     Label(model.backend == .streamedMoE
                         ? "About TurboFieldfare" : "View on HuggingFace", systemImage: "link")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                 }
                 .foregroundStyle(Color.brandGreen)
             }
@@ -126,7 +126,7 @@ private struct ModelAvailabilityControl: View {
                         .stroke(Color.brandGreen, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                     Text("\(Int(fraction * 100))")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(Studio.sans(9, weight: .bold))
                 }
                 .frame(width: 32, height: 32)
             }
@@ -256,7 +256,7 @@ struct FamilyCard: View {
                         .foregroundStyle(Color.subtitleGray)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("\(modelCount) model\(modelCount == 1 ? "" : "s")")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                     if !family.badges.isEmpty {
                         HStack(spacing: 6) {
@@ -315,7 +315,7 @@ struct FamilyBadgeChip: View {
             Image(systemName: icon)
                 .font(.system(size: 9, weight: .semibold))
             Text(badge.rawValue)
-                .font(.system(size: 11, weight: .semibold))
+                .font(Studio.sans(11, weight: .semibold))
         }
         .foregroundStyle(tint)
         .padding(.horizontal, 8)

@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Shared state for the header dropdowns (model picker, prompt presets).
+/// Shared state for the header dropdowns (model picker, prompt presets)
+/// and the composer attach popup.
 ///
 /// The panels are hosted at the window root (see RootView) — NOT in a
 /// per-button overlay — because the header lives in a `.safeAreaInset` bar,
@@ -13,6 +14,7 @@ final class HeaderDropdown {
     enum Kind: Hashable {
         case modelPicker
         case promptPresets
+        case attach
     }
 
     /// Which dropdown is open; nil when all are closed.
@@ -23,6 +25,9 @@ final class HeaderDropdown {
     /// Prompt being edited; the editor sheet is hosted at the window root so
     /// closing the dropdown does not tear down the sheet's host view.
     var editingPrompt: PromptPreset?
+    /// Composer attach actions; registered by ComposerView while it is on screen.
+    var attachPhoto: (() -> Void)?
+    var attachFile: (() -> Void)?
 
     func toggle(_ kind: Kind) {
         open = open == kind ? nil : kind
@@ -44,12 +49,15 @@ extension View {
         }
     }
 
-    /// Liquid-glass chrome shared by the root-hosted dropdown panels.
-    /// Interactive regular glass (same as the capsule/header circles) gives
-    /// the panel the full "liquid" character; 14pt radius reads as a popover.
+    /// Solid popover chrome for the root-hosted dropdown panels.
     func dropdownChrome(width: CGFloat) -> some View {
         frame(width: width)
-            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.cardFill))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.cardStroke, lineWidth: 1))
+            .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
     }
 }

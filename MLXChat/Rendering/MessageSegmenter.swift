@@ -54,8 +54,10 @@ struct Artifact: Identifiable, Hashable {
 /// Splits raw assistant markdown into markdown runs and artifact blocks.
 ///
 /// Rules: a fenced block becomes an artifact when its language is html/svg (any size),
-/// or it has >= 16 lines, or >= 1200 characters. Smaller fences stay embedded in the
-/// surrounding markdown. An unterminated trailing fence yields `isComplete: false`.
+/// or it has >= 16 lines, or >= 1200 characters. `md` / `markdown` fences stay in the
+/// chat body — that is the reply format, not a downloadable file. Smaller fences stay
+/// embedded in the surrounding markdown. An unterminated trailing fence yields
+/// `isComplete: false`.
 enum MessageSegmenter {
     private static let artifactMinLines = 16
     private static let artifactMinChars = 1200
@@ -83,7 +85,9 @@ enum MessageSegmenter {
 
         func closeFence(complete: Bool) {
             let content = fenceLines.joined(separator: "\n")
-            if isArtifact(language: fenceLanguage, content: content) {
+            if isMarkdownDocumentFence(language: fenceLanguage) {
+                markdownBuffer.append(contentsOf: fenceLines)
+            } else if isArtifact(language: fenceLanguage, content: content) {
                 flushMarkdown()
                 blocks.append(.artifact(makeArtifact(
                     id: nextID, language: fenceLanguage, content: content, complete: complete)))
@@ -165,8 +169,14 @@ enum MessageSegmenter {
     private static func isArtifact(language: String?, content: String) -> Bool {
         let lang = language?.lowercased()
         if lang == "html" || lang == "svg" { return true }
+        if isMarkdownDocumentFence(language: language) { return false }
         if content.count >= artifactMinChars { return true }
         return content.components(separatedBy: "\n").count >= artifactMinLines
+    }
+
+    private static func isMarkdownDocumentFence(language: String?) -> Bool {
+        let lang = language?.lowercased()
+        return lang == "md" || lang == "markdown"
     }
 
     private static func makeArtifact(id: Int, language: String?, content: String, complete: Bool) -> Artifact {

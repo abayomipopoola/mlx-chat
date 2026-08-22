@@ -12,6 +12,7 @@ model first:
 - `gemma4`: `mlx-community/gemma-4-26b-a4b-it-4bit`
 - `gemma4-qat`: `mlx-community/gemma-4-26B-A4B-it-qat-4bit`
 - `qwen36`: `mlx-community/Qwen3.6-35B-A3B-4bit`
+- `ornith15`: `ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit`
 
 The old `--source standard|qat` spellings remain accepted as compatibility
 aliases for saved workflows.

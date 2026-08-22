@@ -24,6 +24,13 @@ final class AppleIntelligenceEngine: ChatEngine {
 
     static var isAvailable: Bool { availabilityMessage() == nil }
 
+    /// Foundation Models often wraps a whole reply in a markdown fence when the
+    /// prompt mentions Markdown. Other engines write the same format inline.
+    static func chatStylePrompt(_ systemPrompt: String) -> String {
+        systemPrompt
+            + "\n\nWrite the reply as chat text. Do not wrap the whole answer in a markdown, json, or xml fence."
+    }
+
     /// Token budget for history trimming.
     static var contextTokens: Int {
         if #available(macOS 26.4, *) {
@@ -60,7 +67,7 @@ final class AppleIntelligenceEngine: ChatEngine {
 
                     var entries: [Transcript.Entry] = [
                         .instructions(.init(
-                            segments: [.text(.init(content: systemPrompt))],
+                            segments: [.text(.init(content: Self.chatStylePrompt(systemPrompt)))],
                             toolDefinitions: []))
                     ]
                     for message in trimmed.dropLast() {

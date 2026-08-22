@@ -29,7 +29,7 @@ struct PendingAttachmentStrip: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.iconBlue)
                     Text(name)
-                        .font(.system(size: 12.5))
+                        .font(Studio.sans(12.5))
                         .lineLimit(1)
                         .foregroundStyle(.primary)
                     clearChipButton { onClearFile() }
@@ -37,7 +37,7 @@ struct PendingAttachmentStrip: View {
                 .padding(.leading, 10)
                 .padding(.trailing, 6)
                 .padding(.vertical, 6)
-                .glassEffect(.regular, in: .capsule)
+                .studioQuietFill(in: Capsule())
                 .accessibilityIdentifier("composerAttachmentChip")
             }
 
@@ -62,7 +62,7 @@ struct ComposerStatusRows: View {
     @Environment(ChatController.self) private var chat
 
     var body: some View {
-        switch chat.runtime.state {
+        switch chat.runtime.effectiveState {
         case .downloading(let id):
             DownloadStatusRow(modelID: id)
         case .loading(let id, let fraction):
@@ -82,7 +82,7 @@ private func statusRow<Content: View>(@ViewBuilder content: () -> Content) -> so
     content()
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .studioQuietFill(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 }
 
 // MARK: - Download status
@@ -99,7 +99,7 @@ private struct DownloadStatusRow: View {
                 ProgressView(value: fraction)
                     .frame(maxWidth: 220)
                 Text(downloadLabel(model: model, fraction: fraction))
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel") {
@@ -135,7 +135,7 @@ private struct LoadingStatusRow: View {
                 ProgressView(value: fraction)
                     .frame(maxWidth: 220)
                 Text("Loading \(name)… \(Int(fraction * 100))%")
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -155,7 +155,7 @@ private struct ErrorBannerRow: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                 Text(banner)
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .lineLimit(2)
                 Spacer()
                 if chat.canRetry {

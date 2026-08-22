@@ -4,7 +4,6 @@ import SwiftUI
 /// Central registry of UserDefaults keys and their defaults.
 enum Keys {
     static let selectedModelID = "selectedModelID"
-    static let personalizationEnabled = "personalization.enabled"
     static let personalizationInstructions = "personalization.instructions"
     static let personalizationTemperature = "personalization.temperature"
     static let promptPreset = "prompt.preset"
@@ -25,7 +24,6 @@ enum Keys {
         /// install. A local model becomes the selection only when the
         /// user picks it, and that choice persists across launches.
         static let selectedModelID = appleIntelligenceEngineID
-        static let personalizationEnabled = true
         static let personalizationInstructions = ""
         static let personalizationTemperature = 0.4
         static let autoUnloadMinutes = 10

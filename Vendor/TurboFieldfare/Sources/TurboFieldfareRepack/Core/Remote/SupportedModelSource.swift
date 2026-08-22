@@ -75,10 +75,26 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
+    /// Same Qwen3.6-35B-A3B architecture as `qwen36`. This MLX conversion
+    /// has no vision tower, so the download is the language tensors plus
+    /// tokenizer and metadata sidecars. Installed bytes reuse Qwen's
+    /// resident-index and 16 KB page-rounding overhead.
+    public static let ornith15 = SupportedModelSource(
+        name: "ornith15",
+        displayName: "Ornith 1.5 35B-A3B 4-bit",
+        repoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+        revision: "19504d912fa8fc7622bf6b1de3db5d5d890b1f02",
+        sourceIndexSHA256:
+            "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36",
+        modelID: "ornith-1.5-35b-a3b-4bit",
+        approximateDownloadBytes: 19_528_808_680,
+        installedBytes: 19_546_274_845,
+        reserveBytes: 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, gemma4QAT, qwen36]
+    public static let all: [SupportedModelSource] = [gemma4, gemma4QAT, qwen36, ornith15]
 
     public static func named(_ name: String) -> SupportedModelSource? {
         // Keep the selectors used by MLX Chat's first streamed-model release.

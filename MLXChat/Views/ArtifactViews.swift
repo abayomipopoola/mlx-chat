@@ -36,7 +36,7 @@ struct ExpandableArtifactCard: View {
                 controls
                 Divider()
                 content
-                    .frame(height: 340)
+                    .frame(height: ProcessInfo.processInfo.arguments.contains("--expand-artifacts") ? 420 : 340)
             }
         }
         .background(Color.cardFill.opacity(expanded ? 1 : 0))
@@ -46,7 +46,12 @@ struct ExpandableArtifactCard: View {
         .clipShape(RoundedRectangle(cornerRadius: Studio.radiusCard))
         .frame(maxWidth: expanded ? .infinity : 420, alignment: .leading)
         .animation(.easeOut(duration: 0.18), value: expanded)
-        .onAppear { tab = canPreview ? .preview : .code }
+        .onAppear {
+            tab = canPreview ? .preview : .code
+            if ProcessInfo.processInfo.arguments.contains("--expand-artifacts") {
+                expanded = true
+            }
+        }
     }
 
     private var headerButton: some View {
@@ -60,10 +65,10 @@ struct ExpandableArtifactCard: View {
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(artifact.title)
-                        .font(.headline)
+                        .font(Studio.sans(13, weight: .semibold))
                         .lineLimit(1)
                     Text(artifact.isComplete ? "\(artifact.lineCount) lines" : "Writing…")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -182,10 +187,28 @@ struct ExpandableArtifactCard: View {
     }
 }
 
-// MARK: - WKWebView wrapper (sandboxed preview; external links open in the browser)
+// MARK: - WKWebView wrapper (sandboxed preview; user-clicked links open in the browser)
 
 struct WebHTMLView: NSViewRepresentable {
     let html: String
+
+    private static let networkBlockRules = """
+        [{"trigger":{"url-filter":"^https?://.*"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^wss?://.*"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^ftp://.*"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^file://.*"},"action":{"type":"block"}}]
+        """
+
+    private static let compiledNetworkBlock: Task<WKContentRuleList?, Never> = Task {
+        await withCheckedContinuation { continuation in
+            WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: "artifact-network-block",
+                encodedContentRuleList: networkBlockRules
+            ) { list, _ in
+                continuation.resume(returning: list)
+            }
+        }
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -195,29 +218,62 @@ struct WebHTMLView: NSViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        let coordinator = context.coordinator
+        Task {
+            let list = await Self.compiledNetworkBlock.value
+            await MainActor.run {
+                if let list {
+                    webView.configuration.userContentController.add(list)
+                }
+                coordinator.markContentRulesResolved()
+                coordinator.loadPendingHTML(in: webView)
+            }
+        }
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.lastHTML != html else { return }
-        context.coordinator.lastHTML = html
-        webView.loadHTMLString(html, baseURL: nil)
+        context.coordinator.enqueueHTML(html, in: webView)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var lastHTML: String?
+        var pendingHTML: String?
+        private var contentRulesResolved = false
+
+        func enqueueHTML(_ html: String, in webView: WKWebView) {
+            pendingHTML = html
+            loadPendingHTML(in: webView)
+        }
+
+        func markContentRulesResolved() {
+            contentRulesResolved = true
+        }
+
+        func loadPendingHTML(in webView: WKWebView) {
+            guard contentRulesResolved, let html = pendingHTML, lastHTML != html else { return }
+            lastHTML = html
+            webView.loadHTMLString(html, baseURL: nil)
+        }
 
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            if navigationAction.navigationType == .linkActivated,
-               let url = navigationAction.request.url {
-                NSWorkspace.shared.open(url)
+            switch ArtifactNavigationPolicy.decision(
+                for: navigationAction.request.url,
+                isLinkActivated: navigationAction.navigationType == .linkActivated
+            ) {
+            case .openInBrowser:
+                if let url = navigationAction.request.url {
+                    NSWorkspace.shared.open(url)
+                }
                 decisionHandler(.cancel)
-            } else {
+            case .allowInWebView:
                 decisionHandler(.allow)
+            case .cancel:
+                decisionHandler(.cancel)
             }
         }
     }

@@ -10,13 +10,25 @@ final class ChatController {
     let modelStore: ModelStore
     let runtime: EngineRuntime
     /// Wired by RootView once the SwiftData context exists.
-    var conversationStore: ConversationStore?
+    var conversationStore: ConversationStore? {
+        didSet {
+            conversationStore?.onSaveError = { [weak self] error in
+                self?.errorBanner = "Couldn't save chat history: \(error.localizedDescription)"
+            }
+            conversationStore?.onSaveSuccess = { [weak self] in
+                guard let self, self.errorBanner?.hasPrefix("Couldn't save chat history:") == true else {
+                    return
+                }
+                self.errorBanner = nil
+            }
+        }
+    }
 
     /// Selected engine/model id ("apple-intelligence" or an HF repo id).
     /// A persisted local selection whose files are gone (fresh install, moved
     /// streamed install, or model deleted outside the app) falls back to Apple
     /// Intelligence silently.
-    var selectedModelID: String {
+    private(set) var selectedModelID: String {
         didSet {
             UserDefaults.standard.set(selectedModelID, forKey: Keys.selectedModelID)
             guard oldValue != selectedModelID else { return }
@@ -26,6 +38,18 @@ final class ChatController {
 
     /// Transient "Switched to …" confirmation shown after a model switch loads.
     private(set) var switchToast: String?
+
+    /// UI-verification hook: hold the confirmation banner for screenshots.
+    var effectiveSwitchToast: String? {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--fake-switch-toast"),
+           index + 1 < arguments.count {
+            return "Switched to \(arguments[index + 1])"
+        }
+#endif
+        return switchToast
+    }
     private var toastTask: Task<Void, Never>?
 
     private(set) var isStreaming = false
@@ -58,18 +82,40 @@ final class ChatController {
     }
 
     var selectedModelDisplayName: String {
-        if selectedModelID == appleIntelligenceEngineID { return "Apple Intelligence" }
-        return modelStore.model(for: selectedModelID)?.pickerDisplayName ?? selectedModelID
+        modelDisplayName(for: selectedModelID)
     }
 
-    /// Whether the header shows the thinking on/off bulb for the selected model.
+    func modelDisplayName(for id: String) -> String {
+        if id == appleIntelligenceEngineID { return "Apple Intelligence" }
+        return modelStore.model(for: id)?.pickerDisplayName ?? id
+    }
+
+    /// The active engine cannot change halfway through a turn. All model-selection
+    /// surfaces use this method so the header always names the engine generating.
+    func selectModel(_ id: String) {
+        guard !isStreaming else { return }
+        selectedModelID = id
+    }
+
+    /// Whether the header shows a thinking bulb for the selected model.
     var selectedModelSupportsThinking: Bool {
+        modelStore.model(for: selectedModelID)?.supportsThinking == true
+    }
+
+    /// Whether the selected model's chat template can disable thinking per turn.
+    var selectedModelSupportsThinkingToggle: Bool {
         modelStore.model(for: selectedModelID)?.supportsThinkingToggle == true
     }
 
     /// Whether the composer shows the attachment control for the selected model.
     var selectedModelSupportsVision: Bool {
         modelStore.model(for: selectedModelID)?.supportsVision == true
+    }
+
+    /// True while the selected local model is downloading or loading into RAM.
+    /// The composer stays inert until that finishes so a send cannot race load.
+    var isSelectedModelPreparing: Bool {
+        runtime.effectiveState.isPreparing(selectedModelID)
     }
 
     var canRetry: Bool { retryConversation != nil }
@@ -82,7 +128,7 @@ final class ChatController {
         image: Data? = nil,
         attachment: (name: String, text: String)? = nil
     ) {
-        guard !isStreaming, let store = conversationStore else { return }
+        guard !isStreaming, !isSelectedModelPreparing, let store = conversationStore else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || image != nil || attachment != nil else { return }
         errorBanner = nil
@@ -94,6 +140,18 @@ final class ChatController {
             imageData: image,
             attachmentName: attachment?.name,
             attachmentText: attachment?.text)
+
+#if DEBUG
+        // The release-demo recorder still exercises the real composer and
+        // send path, but avoids requiring a 14 GB checkpoint during capture.
+        // Keep this hook debug-only and opt-in so production builds always use
+        // the selected engine.
+        if ProcessInfo.processInfo.arguments.contains("--real-recording-demo")
+            || ProcessInfo.processInfo.arguments.contains("--capture-release-video") {
+            playRecordingDemoTurn(in: conversation)
+            return
+        }
+#endif
         startAssistantTurn(in: conversation)
     }
 
@@ -177,12 +235,36 @@ final class ChatController {
 
     // MARK: - Turn lifecycle
 
+#if DEBUG
+    /// Plays a short deterministic streamed-MoE turn after a real send. This
+    /// is only used by the native screen recorder: the user still clicks the
+    /// picker, types into the actual TextField, and submits through the normal
+    /// ChatScreen -> ChatController path.
+    private func playRecordingDemoTurn(in conversation: Conversation) {
+        guard let store = conversationStore,
+              conversation.orderedMessages.last?.isUser == true
+        else { return }
+
+        let assistant = store.appendMessage(
+            role: "assistant", content: "", to: conversation,
+            modelID: selectedModelID)
+        assistant.thinking = DemoSeed.streamedMoEThinking
+        assistant.thinkingSeconds = 2.8
+        assistant.content = DemoSeed.streamedMoEAnswer
+        assistant.tokensPerSecond = 18.4
+        store.save()
+        transcriptRevision &+= 1
+    }
+#endif
+
     private func startAssistantTurn(in conversation: Conversation) {
         guard let store = conversationStore else { return }
         guard conversation.orderedMessages.last?.isUser == true else { return }
 
+        let modelID = selectedModelID
+
         let assistant = store.appendMessage(
-            role: "assistant", content: "", to: conversation, modelID: selectedModelID)
+            role: "assistant", content: "", to: conversation, modelID: modelID)
         activeMessage = assistant
         streamingMessageID = assistant.id
         isStreaming = true
@@ -196,17 +278,16 @@ final class ChatController {
         // The preset (including Custom, which owns the old "custom instructions"
         // storage) is the single source of prompt customization.
         let systemPrompt = PromptBuilder.systemPrompt(
-            presetText: PromptPresets.effectiveText(for: PromptPresets.selected),
-            personalizationEnabled: false,
-            customInstructions: "")
+            presetText: PromptPresets.effectiveText(for: PromptPresets.selected))
         let temperature = defaults.object(forKey: Keys.personalizationTemperature) as? Double
             ?? Keys.Defaults.personalizationTemperature
 
-        let model = modelStore.model(for: selectedModelID)
+        let model = modelStore.model(for: modelID)
         let supportsVision = model?.supportsVision == true
-        let prior = conversation.orderedMessages
+        let allPrior = conversation.orderedMessages
             .filter { $0.id != assistant.id }
             .filter { !($0.role == "assistant" && $0.content.isEmpty) }
+        let prior = Self.historyMessages(allPrior, for: modelID)
         let pendingUserID = prior.last(where: { $0.isUser })?.id
         let history: [EngineMessage] = prior.map { message in
             if message.isUser {
@@ -227,7 +308,6 @@ final class ChatController {
             }
             return EngineMessage(role: .assistant, text: message.content)
         }
-        let modelID = selectedModelID
         let conversationID = conversation.id
 
         generationTask = Task { [weak self] in
@@ -277,6 +357,16 @@ final class ChatController {
             }
             self.finishTurn(in: conversation)
         }
+    }
+
+    /// Keep only the current model's uninterrupted section of a mixed-model chat.
+    /// This prevents another model's response format and leaked control tokens from
+    /// becoming examples in the next engine's transcript.
+    static func historyMessages(_ messages: [ChatMessage], for modelID: String) -> [ChatMessage] {
+        guard let boundary = messages.lastIndex(where: {
+            !$0.isUser && $0.modelID != modelID
+        }) else { return messages }
+        return Array(messages.suffix(from: messages.index(after: boundary)))
     }
 
     private func finishTurn(in conversation: Conversation) {

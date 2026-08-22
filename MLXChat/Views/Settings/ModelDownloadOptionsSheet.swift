@@ -83,7 +83,7 @@ struct ModelDownloadOptionsSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(sheetTitle)
-                .font(.headline)
+                .font(Studio.sans(13, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
 
@@ -105,7 +105,10 @@ struct ModelDownloadOptionsSheet: View {
             footer
         }
         .frame(width: 540, height: supportsSSDStreaming ? 720 : 470)
-        .onAppear { validateStreamedRuntimeSettings() }
+        .onAppear {
+            validateStreamedRuntimeSettings()
+            store.refreshStorageStats()
+        }
         .onChange(of: isSSDReady) { wasReady, isReady in
             ssdReadinessChanged(wasReady: wasReady, isReady: isReady)
         }
@@ -138,7 +141,7 @@ struct ModelDownloadOptionsSheet: View {
                         .font(Studio.body13)
                     Spacer()
                     Text("Larger values use more RAM for the FP16 KV cache.")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                 }
                 Picker("Context", selection: $streamedContextTokens) {
@@ -158,7 +161,7 @@ struct ModelDownloadOptionsSheet: View {
                         .font(Studio.body13)
                     Spacer()
                     Text("More slots reduce SSD reads and keep more experts in RAM.")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                 }
                 Picker("Expert cache", selection: $streamedExpertCacheSlots) {
@@ -173,7 +176,7 @@ struct ModelDownloadOptionsSheet: View {
             }
 
             Text("The two controls are independent. Changes reload only the SSD-streamed engine; standard MLX models are unchanged.")
-                .font(.caption)
+                .font(Studio.sans(10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -191,7 +194,7 @@ struct ModelDownloadOptionsSheet: View {
                 .background(Circle().fill(selectedMode == .ssdStreamed
                     ? Color.iconBlue : Color.brandGreen))
             Text(model.displayName)
-                .font(.system(size: 21, weight: .bold))
+                .font(Studio.sans(21, weight: .bold))
             Text(supportsSSDStreaming
                 ? "Choose how this MoE model runs. MLX is the default; SSD streaming is an optional low-memory layout."
                 : "This model uses the standard MLX download and runtime.")
@@ -251,7 +254,7 @@ struct ModelDownloadOptionsSheet: View {
                 if let downloaded = progress.downloadedBytes,
                    let total = progress.totalBytes {
                     Text("\(Self.storage(downloaded)) of \(Self.storage(total))")
-                        .font(.caption.monospacedDigit())
+                        .font(Studio.sans(10).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             } else if isSSDReady {
@@ -274,15 +277,15 @@ struct ModelDownloadOptionsSheet: View {
                     .font(Studio.body13)
                     .foregroundStyle(Color.subtitleGray)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Download: about \(Self.storage(streamedVariant.approximateDownloadBytes)) · Free: \(Self.storage(UInt64(max(ModelStore.availableBytes(), 0))))")
-                    .font(.caption)
+                Text("Download: about \(Self.storage(streamedVariant.approximateDownloadBytes)) · Free: \(Self.storage(UInt64(max(store.availableBytes, 0))))")
+                    .font(Studio.sans(10))
                     .foregroundStyle(.secondary)
             }
 
             if let error = store.streamedInstallError(
                 for: streamedVariant.modelID) {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .font(Studio.sans(10))
                     .foregroundStyle(Color.iconOrange)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -290,7 +293,7 @@ struct ModelDownloadOptionsSheet: View {
             if !isSSDDownloading {
                 Button("Use Existing .gturbo Folder…") { chooseInstall() }
                     .buttonStyle(.bordered)
-                    .font(.caption.weight(.semibold))
+                    .font(Studio.sans(10, weight: .semibold))
                     .accessibilityIdentifier("chooseExistingStreamedInstall")
             }
             }
@@ -340,14 +343,14 @@ struct ModelDownloadOptionsSheet: View {
             modelID: streamedModelID,
             directory: directory)
         if registrationError == nil {
-            chat.selectedModelID = streamedModelID
+            chat.selectModel(streamedModelID)
             dismiss()
         }
     }
 
     private func useOrDownloadMLX() {
         if store.isAvailable(model.id) {
-            chat.selectedModelID = model.id
+            chat.selectModel(model.id)
         } else {
             store.download(model.id)
         }
@@ -358,7 +361,7 @@ struct ModelDownloadOptionsSheet: View {
         guard let streamedModelID else { return }
         if isSSDReady {
             let wasSelected = chat.selectedModelID == streamedModelID
-            chat.selectedModelID = streamedModelID
+            chat.selectModel(streamedModelID)
             if wasSelected {
                 chat.preloadSelectedModelIfAvailable()
             }
@@ -371,7 +374,7 @@ struct ModelDownloadOptionsSheet: View {
     private func ssdReadinessChanged(wasReady: Bool, isReady: Bool) {
         guard selectedMode == .ssdStreamed, !wasReady, isReady else { return }
         guard let streamedModelID else { return }
-        chat.selectedModelID = streamedModelID
+        chat.selectModel(streamedModelID)
         dismiss()
     }
 

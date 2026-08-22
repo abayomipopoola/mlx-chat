@@ -3,11 +3,14 @@ import MarkdownUI
 import SwiftUI
 
 struct MessageView: View {
-    @Environment(ChatController.self) private var chat
     @Environment(\.colorScheme) private var colorScheme
 
     let message: ChatMessage
-    let conversation: Conversation?
+    let isStreamingThis: Bool
+    let isInThinkPhase: Bool
+    let isAnyStreaming: Bool
+    let modelDisplayName: String?
+    let onRegenerate: (() -> Void)?
 
     var body: some View {
         if message.isUser {
@@ -38,7 +41,7 @@ struct MessageView: View {
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(Color.iconBlue)
                             Text(name)
-                                .font(.system(size: 12.5))
+                                .font(Studio.sans(12.5))
                                 .lineLimit(1)
                         }
                         .padding(.horizontal, 10)
@@ -50,8 +53,12 @@ struct MessageView: View {
                     }
 
                     if !message.content.isEmpty {
-                        Text(message.content)
-                            .font(.system(size: 15))
+                        Markdown(MarkdownContent(MathPreprocessor.preprocess(message.content)))
+                            .markdownTheme(.chatUser)
+                            .markdownInlineImageProvider(
+                                MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
+                            .markdownImageProvider(
+                                MathBlockProvider(fontSize: 16 + Studio.monaPointBump, color: mathColor))
                             .textSelection(.enabled)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
@@ -70,13 +77,11 @@ struct MessageView: View {
 
     // MARK: - Assistant
 
-    private var isStreamingThis: Bool { chat.streamingMessageID == message.id }
-
     private var assistantBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             thinkingSection
 
-            if message.content.isEmpty, isStreamingThis, !chat.isInThinkPhase {
+            if message.content.isEmpty, isStreamingThis, !isInThinkPhase {
                 WaitingDots()
             } else {
                 contentBlocks
@@ -89,23 +94,23 @@ struct MessageView: View {
 
     @ViewBuilder
     private var thinkingSection: some View {
-        if isStreamingThis, chat.isInThinkPhase {
+        if isStreamingThis, isInThinkPhase {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("Thinking…")
                     .foregroundStyle(.secondary)
-                    .font(.callout)
+                    .font(Studio.sans(12))
             }
         } else if let thinking = message.thinking, !thinking.isEmpty {
             DisclosureGroup {
                 Markdown(thinking)
                     .markdownTheme(.chat)
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
             } label: {
                 Text(thinkingLabel)
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
             }
         }
@@ -123,28 +128,57 @@ struct MessageView: View {
     }
 
     private var contentBlocks: some View {
-        ForEach(MessageSegmenter.segment(message.content)) { block in
+        ForEach(SegmentCache.shared.segments(for: message.id, content: message.content)) { block in
             switch block {
             case .markdown(_, let text):
-                let renderedText = isStreamingThis
-                    ? text : MathPreprocessor.preprocess(text)
-                Markdown(MarkdownContent(renderedText))
-                    .markdownTheme(.chat)
-                    .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
-                    .markdownInlineImageProvider(MathInlineProvider(fontSize: 15, color: mathColor))
-                    .markdownImageProvider(MathBlockProvider(fontSize: 17, color: mathColor))
-                    .textSelection(.enabled)
+                streamingAssistantMarkdown(text)
             case .artifact(let artifact):
                 ExpandableArtifactCard(artifact: artifact)
             }
         }
     }
 
-    // MARK: - Footer (tok/s + hover actions)
-
-    private var isLastMessage: Bool {
-        conversation?.orderedMessages.last?.id == message.id
+    /// Preprocess every streaming flush. WelcomeView's anti-ghost pair is
+    /// applied only to this markdown subview so LazyVStack insert animation
+    /// on `messages.count` is left intact.
+    @ViewBuilder
+    private func streamingAssistantMarkdown(_ text: String) -> some View {
+        let renderedText = isStreamingThis
+            ? Self.preprocessStreamingFlush(text)
+            : MathPreprocessor.preprocess(text)
+        let markdown = Markdown(MarkdownContent(renderedText))
+            .markdownTheme(.chat)
+            .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
+            .markdownInlineImageProvider(MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
+            .markdownImageProvider(MathBlockProvider(fontSize: 16 + Studio.monaPointBump, color: mathColor))
+            .textSelection(.enabled)
+        if isStreamingThis {
+            markdown
+                .geometryGroup()
+                .transaction { $0.animation = nil }
+        } else {
+            markdown
+        }
     }
+
+    /// Hold back a trailing odd `$` so a half-open `$…` span is not fed to
+    /// the preprocessor as if it were closed. The raw suffix stays visible
+    /// until the closer arrives on a later flush.
+    private static func preprocessStreamingFlush(_ text: String) -> String {
+        let dollarCount = text.reduce(into: 0) { count, character in
+            if character == "$" { count += 1 }
+        }
+        guard !dollarCount.isMultiple(of: 2),
+              let lastDollar = text.lastIndex(of: "$")
+        else {
+            return MathPreprocessor.preprocess(text)
+        }
+        let stable = String(text[..<lastDollar])
+        let held = String(text[lastDollar...])
+        return MathPreprocessor.preprocess(stable) + held
+    }
+
+    // MARK: - Footer (tok/s + hover actions)
 
     /// Always-visible icon actions under assistant messages (MLX Studio pattern) —
     /// stable layout, no hover-driven insertion, so nothing flickers.
@@ -154,10 +188,10 @@ struct MessageView: View {
             HStack(spacing: 16) {
                 CopyButton(text: message.content, size: 11)
 
-                if isLastMessage, conversation != nil {
+                if let onRegenerate {
                     Button {
-                        if let conversation, !chat.isStreaming {
-                            chat.regenerate(message, in: conversation)
+                        if !isAnyStreaming {
+                            onRegenerate()
                         }
                     } label: {
                         Image(systemName: "arrow.clockwise")
@@ -166,14 +200,21 @@ struct MessageView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .disabled(chat.isStreaming)
+                    .disabled(isAnyStreaming)
                     .help("Regenerate")
                 }
 
                 if let tps = message.tokensPerSecond {
                     Text(String(format: "%.1f tok/s", tps))
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.tertiary)
+                }
+
+                if let modelDisplayName {
+                    Text(modelDisplayName)
+                        .font(Studio.sans(10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("responseModelName")
                 }
             }
             .padding(.top, 2)

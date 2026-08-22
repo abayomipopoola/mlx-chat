@@ -51,6 +51,77 @@ import Testing
         #expect(upgraded.thinking?.startsInside == true)
     }
 
+    @Test func ornithImportedModelUsesQwenThinkingProtocol() {
+        for repoID in [
+            "mlx-community/Ornith-1.0-9B-4bit",
+            "ornith-ai/Ornith-1.5-9B-MLX-4bit",
+            "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+        ] {
+            let model = ModelCatalog.importedModel(repoID: repoID)
+
+            #expect(model.supportsThinkingToggle, "thinking toggle for \(repoID)")
+            #expect(model.thinking?.open == "<think>")
+            #expect(model.thinking?.close == "</think>")
+            #expect(model.thinking?.startsInside == true)
+            #expect(model.ctxTokens == 262_144)
+            #expect(model.extraEOSTokens.contains("<|im_end|>"))
+            #expect(model.extraEOSTokens.contains("<|endoftext|>"))
+        }
+    }
+
+    @Test func ornithCapabilitiesUpgradeExistingImport() {
+        let staleImport = ModelCatalog.importedModel(repoID: "owner/Unrelated-Model")
+        let ornith = CatalogModel(
+            id: "DreamFoundries/Ornith-1.0-9B-4bit",
+            displayName: "Ornith-1.0-9B-4bit",
+            sizeGB: staleImport.sizeGB,
+            ctxTokens: staleImport.ctxTokens,
+            quantLabel: staleImport.quantLabel,
+            category: staleImport.category,
+            blurb: staleImport.blurb,
+            extraEOSTokens: staleImport.extraEOSTokens,
+            thinking: nil)
+
+        let upgraded = ModelCatalog.applyingKnownCapabilities(to: ornith)
+
+        #expect(upgraded.supportsThinkingToggle)
+        #expect(upgraded.thinking?.startsInside == true)
+    }
+
+    @Test func ornith15DenseImportIsNotAStreamedMoESource() {
+        let model = ModelCatalog.importedModel(
+            repoID: "ornith-ai/Ornith-1.5-9B-MLX-4bit")
+
+        #expect(model.backend == .mlx)
+        #expect(!StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id))
+        #expect(ModelDownloadMode.availableModes(for: model.id) == [.mlx])
+    }
+
+    @Test func ornith15CatalogModelsUseQwenThinkingProtocol() {
+        for id in [
+            "ornith-ai/Ornith-1.5-9B-MLX-4bit",
+            "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+            StreamedMoEInstall.ornith15.modelID,
+        ] {
+            let model = ModelCatalog.model(for: id)
+            #expect(model?.supportsThinkingToggle == true, "thinking toggle for \(id)")
+            #expect(model?.thinking?.startsInside == true)
+            #expect(model?.extraEOSTokens.contains("<|im_end|>") == true)
+            #expect(model.map { ModelCatalog.familyID(for: $0) } == "ornith")
+        }
+        #expect(ModelCatalog.families.contains { $0.id == "ornith" })
+    }
+
+    @Test func qwen35ConfigInfersThinkingOnUnknownImport() {
+        let config = Data(#"{"model_type":"qwen3_5","text_config":{}}"#.utf8)
+        let model = ModelCatalog.importedModel(
+            repoID: "owner/Some-Qwen35-Finetune", configJSON: config)
+
+        #expect(model.supportsThinkingToggle)
+        #expect(model.thinking?.startsInside == true)
+        #expect(model.ctxTokens == 262_144)
+    }
+
     @Test func legacyCatalogModelDecodesWithoutSupportsVision() throws {
         // Old UserDefaults payload before the vision field existed.
         let legacy = """
@@ -144,6 +215,21 @@ import Testing
         #expect(ssd?.pickerDisplayName == "SSD · Qwen3.6 35B A3B")
     }
 
+    @Test func ornith15OffersTextOnlyMLXAndSSDIdentities() {
+        let mlx = ModelCatalog.model(for: StreamedMoEInstall.ornith15.sourceRepoID)
+        let ssd = ModelCatalog.model(for: StreamedMoEInstall.ornith15.modelID)
+
+        #expect(mlx?.backend == .mlx)
+        #expect(mlx?.supportsVision == false)
+        #expect(mlx.map { ModelCatalog.familyID(for: $0) } == "ornith")
+        #expect(ssd?.backend == .streamedMoE)
+        #expect(ssd?.supportsVision == false)
+        #expect(ssd?.supportsThinkingToggle == true)
+        #expect(ssd.map { ModelCatalog.familyID(for: $0) } == "ornith")
+        #expect(mlx?.pickerDisplayName == "MLX · Ornith 1.5 35B A3B")
+        #expect(ssd?.pickerDisplayName == "SSD · Ornith 1.5 35B A3B")
+    }
+
     @Test func lfm25CatalogOffersEveryOfficialPrecisionAndCommunityBF16() {
         let official = ModelCatalog.model(for: "LiquidAI/LFM2.5-2.6B-MLX")
         let community = ModelCatalog.model(for: "mlx-community/LFM2.5-2.6B-bf16")
@@ -156,6 +242,7 @@ import Testing
         #expect(official?.sourceSubfolder == "4bit")
         #expect(official?.ctxTokens == 131_072)
         #expect(official?.thinking?.startsInside == true)
+        #expect(official?.supportsThinking == true)
         #expect(official?.supportsThinkingToggle == false)
         #expect(official.map { ModelCatalog.familyID(for: $0) } == "lfm25")
         #expect(community?.sourceSubfolder == nil)

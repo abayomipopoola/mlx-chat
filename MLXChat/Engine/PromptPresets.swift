@@ -25,8 +25,9 @@ enum PromptPreset: String, CaseIterable, Identifiable {
         case .general:
             return """
                 You are a helpful AI assistant. Be concise and direct.
-                - Use markdown formatting for better readability
-                - For code, use appropriate syntax highlighting
+                - Write replies as chat text, not as a markdown or code file
+                - Use bold, lists, or short headings in the reply when they help
+                - For code, use a fenced block with a language tag
                 - Stay focused on the user's question
                 """
         case .creative:

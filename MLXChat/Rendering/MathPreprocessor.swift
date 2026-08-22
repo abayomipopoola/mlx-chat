@@ -6,8 +6,7 @@ import Foundation
 ///
 /// - Display math (`$$…$$`, `\[…\]`) → own-paragraph `![math](swiftmath://d/<b64url>)`
 /// - Inline math (`\(…\)`, and `$…$` that looks like LaTeX) → `![math](swiftmath://i/<b64url>)`
-/// - `\boxed{X}` (delimited or bare) → boxed variants `bd`/`bi`: SwiftMath has no
-///   \boxed support, so the image provider draws the box around the rendered X.
+/// - Bare `\boxed{X}` in prose → inline image. SwaTex renders `\boxed` itself.
 enum MathPreprocessor {
     static func preprocess(_ markdown: String) -> String {
         // Math dressed up as a code fence renders as an equation instead.
@@ -188,7 +187,20 @@ enum MathPreprocessor {
     }
 
     private static func isIndentedCodeLine(_ line: Substring) -> Bool {
-        line.first == "\t" || line.hasPrefix("    ")
+        let remainder: Substring
+        if line.first == "\t" {
+            remainder = line.dropFirst()
+        } else if line.hasPrefix("    ") {
+            remainder = line.dropFirst(4)
+        } else {
+            return false
+        }
+        // Nested markdown lists use one indent unit plus a marker; they are
+        // not CommonMark indented code, so `$…$` inside them must transform.
+        if remainder.prefixMatch(of: /^[ \t]*(?:[-+*]|[0-9]+[.)])[ \t]+/) != nil {
+            return false
+        }
+        return true
     }
 
     // MARK: - Malformed-model repair
@@ -271,7 +283,7 @@ enum MathPreprocessor {
             "\\frac", "\\sum", "\\prod", "\\int", "\\lim", "\\left",
             "\\right", "\\sqrt", "\\infty", "\\to", "\\cdot", "\\times",
             "\\nabla", "\\epsilon", "\\theta", "\\mathbb", "\\mathrm",
-            "\\begin", "\\end",
+            "\\begin", "\\end", "\\tfrac", "\\dfrac", "\\text",
         ]
         guard commands.contains(where: { line.contains($0) }) else { return false }
         return line.contains("=") || line.first == "\\"
@@ -310,24 +322,75 @@ enum MathPreprocessor {
         output = output.replacing(/(?s)\\\((.{1,300}?)\\\)/) { match in
             inlineMath(String(match.1))
         }
-        output = output.replacing(/\$([^\s$][^$\n]{0,118}?[^\s$]|[^\s$])\$/) { match in
+        output = output.replacing(/\$[ \t]*([^\s$][^$\n]{0,118}?[^\s$]|[^\s$])[ \t]*\$/) { match in
             let latex = String(match.1)
-            if let boxed = boxedContent(latex) { return boxedInlineImage(boxed) }
             // Simple expressions ($i$, $dp[i]$, $dp[0] = 1$) become math-italic
             // Unicode TEXT — it sits on the text baseline perfectly, unlike an
             // image. Must contain a letter so "$100$" stays money-like.
+            // Trailing `[ \t]*` before the closing `$` can pair `$5 and $10`
+            // or `$x and $y` as one span; keep those English phrases literal
+            // unless the capture already looks like an expression.
             if latex.wholeMatch(of: /[A-Za-z0-9'\[\](),=+\-*\/×·. ]{1,60}/) != nil,
-               latex.contains(/[A-Za-z]/) {
+               latex.contains(/[A-Za-z]/),
+               !(latex.contains(" ") && latex.wholeMatch(of: /.*[=+\-*\/×·].*/) == nil) {
                 return mathItalic(latex)
+            }
+            // Paired abs bars (`$|Pos(B) - Pos(D)| = 1$`) are math, but a lone
+            // prose pipe is not. Do not add `|` to the italic charset — that
+            // path is text, and this span needs a math image.
+            if looksLikePairedPipeAbs(latex) {
+                return inlineImage(latex)
+            }
+            // `$P ⇔ Q$` has no TeX commands; SwaTex still typesets the Unicode.
+            if containsMathUnicode(latex) {
+                return inlineImage(latex)
             }
             // Anything with real LaTeX syntax renders as an image.
             guard latex.contains(/[\\^_{}<>]/) else { return String(match.0) }
-            return inlineImage(stripBoxed(latex))
+            return inlineImage(latex)
         }
+        output = wrapUnicodeBigOperators(output)
         // `transform` only receives slices outside code blocks, so bare boxed
         // expressions can be converted directly without scanning for fences again.
         output = convertBareBoxed(output)
         return output
+    }
+
+    /// Unicode math in a `$…$` span with no TeX commands. Prose operators
+    /// stay as text and draw through the font cascade.
+    private static func containsMathUnicode(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0.properties.isMath && $0.value > 0x7F }
+    }
+
+    /// Unicode Σ/∑/Π/∏/∫ plus a subscript and/or superscript become inline
+    /// math images. Lone letters with no script stay literal.
+    private static func wrapUnicodeBigOperators(_ text: String) -> String {
+        text.replacing(
+            /([Σ∑Π∏∫])(_\{[^}\n]{1,80}\}(?:\^\{[^}\n]{1,40}\})?|\^\{[^}\n]{1,40}\}(?:_\{[^}\n]{1,80}\})?)/
+        ) { match in
+            let command: String
+            switch String(match.1) {
+            case "Σ", "∑": command = "\\sum"
+            case "Π", "∏": command = "\\prod"
+            default: command = "\\int"
+            }
+            return inlineImage(command + String(match.2))
+        }
+    }
+
+    /// True for a dollar span whose pipes are paired abs/norm bars and the
+    /// rest of the span looks like an expression. A single prose pipe
+    /// (`$a | b$`) and table-like `$| a | b | c |$` stay literal; currency
+    /// spans never reach here because they have no `|`.
+    private static func looksLikePairedPipeAbs(_ latex: String) -> Bool {
+        let pipeCount = latex.reduce(into: 0) { count, character in
+            if character == "|" { count += 1 }
+        }
+        guard pipeCount >= 2, pipeCount.isMultiple(of: 2) else { return false }
+        if latex.contains(/[=+\-*\/^_{}\\<>]/) || latex.contains(/[A-Za-z]\(/) {
+            return true
+        }
+        return pipeCount == 2 && latex.contains(/\|[A-Za-z0-9'\[\](),. ]+\|/)
     }
 
     /// Display or inline rendering chosen by position. Models often emit
@@ -348,46 +411,19 @@ enum MathPreprocessor {
             && text[range.upperBound..<lineEnd].allSatisfy(" \t".contains)
     }
 
-    /// \boxed-aware display rendering: a span that IS `\boxed{X}` gets the box
-    /// drawn around X's image; \boxed embedded in a larger expression degrades
-    /// to its content so the surrounding math still renders.
     private static func displayMath(_ latex: String) -> String {
-        if let boxed = boxedContent(latex) { return boxedDisplayImage(boxed) }
-        return displayImage(stripBoxed(latex))
+        displayImage(latex)
     }
 
-    /// \boxed-aware inline rendering; same policy as displayMath.
     private static func inlineMath(_ latex: String) -> String {
-        if let boxed = boxedContent(latex) { return boxedInlineImage(boxed) }
-        return inlineImage(stripBoxed(latex))
+        inlineImage(latex)
     }
 
     private static func convertBareBoxed(_ text: String) -> String {
         var rest = text
         var result = ""
-        while let (inner, range) = firstBoxed(in: rest) {
-            result += rest[..<range.lowerBound] + boxedInlineImage(inner)
-            rest = String(rest[range.upperBound...])
-        }
-        return result + rest
-    }
-
-    /// If `latex` is exactly `\boxed{X}` (surrounding whitespace tolerated),
-    /// returns X — else nil.
-    private static func boxedContent(_ latex: String) -> String? {
-        let trimmed = latex.trimmingCharacters(in: .whitespaces)
-        guard let (inner, range) = firstBoxed(in: trimmed),
-              range.lowerBound == trimmed.startIndex, range.upperBound == trimmed.endIndex
-        else { return nil }
-        return inner
-    }
-
-    /// Replaces every `\boxed{X}` with X (nested braces survive inside X).
-    private static func stripBoxed(_ latex: String) -> String {
-        var rest = latex
-        var result = ""
-        while let (inner, range) = firstBoxed(in: rest) {
-            result += rest[..<range.lowerBound] + inner
+        while let (_, range) = firstBoxed(in: rest) {
+            result += rest[..<range.lowerBound] + inlineImage(String(rest[range]))
             rest = String(rest[range.upperBound...])
         }
         return result + rest
@@ -413,8 +449,8 @@ enum MathPreprocessor {
         return (String(text[start.upperBound..<index]), start.lowerBound..<text.index(after: index))
     }
 
-    /// Maps ASCII letters to their MATHEMATICAL ITALIC code points (the same
-    /// glyph style SwiftMath uses), leaving digits and symbols untouched.
+    /// Maps ASCII letters to their MATHEMATICAL ITALIC code points, leaving
+    /// digits and symbols untouched.
     private static func mathItalic(_ text: String) -> String {
         String(text.flatMap { char -> [Character] in
             guard let scalar = char.unicodeScalars.first, char.unicodeScalars.count == 1 else {
@@ -443,14 +479,6 @@ enum MathPreprocessor {
 
     private static func inlineImage(_ latex: String) -> String {
         "![math](swiftmath://i/\(base64URL(latex)))"
-    }
-
-    private static func boxedDisplayImage(_ latex: String) -> String {
-        "\n\n![math](swiftmath://bd/\(base64URL(latex)))\n\n"
-    }
-
-    private static func boxedInlineImage(_ latex: String) -> String {
-        "![math](swiftmath://bi/\(base64URL(latex)))"
     }
 
     static func base64URL(_ text: String) -> String {

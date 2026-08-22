@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 
 // MARK: - Dynamic color plumbing
@@ -45,15 +46,17 @@ extension Color {
     /// Soft halo behind the hero badge.
     static let mintHalo = Color(lightHex: 0xE3F0EC, darkHex: 0x4FB892, darkAlpha: 0.12)
     /// Flat sidebar pane and gray capsules (model picker).
-    static let sidebarBackground = Color(lightHex: 0xF6F6F7, darkHex: 0x1E1E20)
+    static let sidebarBackground = Color(lightHex: 0xF6F6F7, darkHex: 0x18181A)
     /// Detail pane surface.
-    static let detailBackground = Color(lightHex: 0xFFFFFF, darkHex: 0x161618)
+    static let detailBackground = Color(lightHex: 0xFFFFFF, darkHex: 0x141416)
     /// Card surface.
-    static let cardFill = Color(lightHex: 0xFFFFFF, darkHex: 0x232326)
+    static let cardFill = Color(lightHex: 0xFFFFFF, darkHex: 0x1E1E20)
     /// Search fields, composer pill, status rows.
-    static let fieldFill = Color(lightHex: 0xF0F0F3, darkHex: 0x2A2A2E)
+    static let fieldFill = Color(lightHex: 0xF0F0F3, darkHex: 0x222226)
+    /// Circle behind composer + / send, a step above the pill fill.
+    static let composerButtonFill = Color(lightHex: 0xE2E2E6, darkHex: 0x3F3F46)
     /// 1px hairline on cards and fields.
-    static let cardStroke = Color(lightHex: 0xE5E5E7, darkHex: 0x3A3A3E)
+    static let cardStroke = Color(lightHex: 0xE5E5E7, darkHex: 0x2E2E32)
     /// User message bubble.
     static let bubbleFill = Color(lightHex: 0xF6F6F7, darkHex: 0x2A2A2E)
     /// Secondary copy: hero subtitle, captions, section labels.
@@ -64,6 +67,11 @@ extension Color {
     static let iconBlue = Color(lightHex: 0x2F7CF9, darkHex: 0x549BFF)
     /// Selected conversation row in the sidebar.
     static let sidebarSelection = Color(lightHex: 0xE4EEE9, darkHex: 0x2A3A33)
+    /// Unselected history title, New Chat, and Settings. Darker than system
+    /// secondary in Light so the list holds up on the gray pane.
+    static let sidebarTitle = Color(lightHex: 0x3F3F44, darkHex: 0xC8C8CE)
+    /// Timestamps and search chrome. Darker than system tertiary in Light.
+    static let sidebarMeta = Color(lightHex: 0x5C5C62, darkHex: 0x8E8E93)
 }
 
 // MARK: - Appearance override
@@ -84,37 +92,175 @@ enum AppAppearance {
 // MARK: - Metrics & type scale
 
 enum Studio {
-    static let radiusCard: CGFloat = 14
-    static let radiusSuggestion: CGFloat = 16
-    static let radiusComposer: CGFloat = 27
+    static let radiusCard: CGFloat = 12
+    static let radiusSuggestion: CGFloat = 14
+    static let radiusComposer: CGFloat = 24
     static let radiusField: CGFloat = 8
     static let heroBadgeSize: CGFloat = 145
     static let heroBadgeRadius: CGFloat = 32
     static let haloSize: CGFloat = 330
-    static let sendButtonSize: CGFloat = 42
+    /// Composer send and attach controls share this hit target.
+    static let sendButtonSize: CGFloat = 28
+    static let headerButtonSize: CGFloat = 28
+    /// After the green light, before the sidebar toggle. Original 10, doubled.
+    static let titlebarAfterLights: CGFloat = 20
+    /// Between the sidebar toggle and back. Original 10, doubled.
+    static let titlebarToggleToHistory: CGFloat = 20
+    static let titlebarHistorySpacing: CGFloat = 2
+    /// Top inset so 28pt cluster icons sit on the traffic-light line.
+    static let titlebarClusterTop: CGFloat = 4
+    /// Shared height for the model capsule and header icon chips.
+    static let headerChipHeight: CGFloat = 30
     static let contentMaxWidth: CGFloat = 660
     static let sidebarWidth: CGFloat = 280
+    /// Horizontal inset for New Chat, search, history, and Settings.
+    static let sidebarInset: CGFloat = 8
+    /// Bottom fade so history dissolves before Settings.
+    static let sidebarListFade: CGFloat = 36
+    /// Gap above the Settings row.
+    static let sidebarSettingsTop: CGFloat = 20
     /// Sidebar top inset: aligns "New chat" with the bottom edge of the detail
-    /// pane's fixed header (16 top padding + 34 capsule + 4 bottom).
-    static let trafficLightInset: CGFloat = 54
-    /// Leading clearance for the window traffic lights when the sidebar is
-    /// collapsed and detail content reaches the window's top-left corner.
-    static let trafficLightClearance: CGFloat = 78
+    /// pane's fixed header (16 top padding + ~28 header control + 4 bottom).
+    static let trafficLightInset: CGFloat = 48
+    /// Width of the three traffic lights plus their leading window inset.
+    static let trafficLightClusterWidth: CGFloat = 66
+    /// Leading inset after the green traffic light (cluster + doubled gap).
+    static let trafficLightClearance: CGFloat = trafficLightClusterWidth + titlebarAfterLights
+    /// Space reserved at the top of the sidebar so New Chat sits below the
+    /// window-chrome overlay (cluster top + icon + doubled gap).
+    static let titlebarSidebarClearance: CGFloat = titlebarClusterTop + headerButtonSize + 24
 
     // Type scale measured from MLX Studio captures (band scan + width calibration),
     // hero sizes taken a step down per user preference.
-    static let titleXL = Font.system(size: 32, weight: .bold)
-    static let heroSubtitle = Font.system(size: 18)
-    static let pageTitle = Font.system(size: 17, weight: .bold)
-    static let rowTitle = Font.system(size: 15, weight: .semibold)
-    static let body13 = Font.system(size: 13)
-    static let body14Semibold = Font.system(size: 14, weight: .semibold)
-    static let cardCaption = Font.system(size: 12.5)
-    /// Matches the transcript body (markdown 15pt) so questions, answers,
-    /// and the composer read as one size.
-    static let composerText = Font.system(size: 15)
-    static let caption13 = Font.system(size: 13)
-    static let sectionLabel = Font.system(size: 12, weight: .semibold)
+    /// Chat and composer body. Antigravity uses Mona Sans at 14px / 1.6 line height.
+    static let chatFontSize: CGFloat = 14
+    /// Extra point on the composer textarea and the response pane only.
+    static let monaPointBump: CGFloat = 1
+    static var chatBodySize: CGFloat { chatFontSize + monaPointBump }
+    static func cascadedNSFont(base: NSFont, size: CGFloat) -> NSFont {
+        // System language cascade first (Apple's documented tofu fix), then
+        // pin math and emoji faces so Mona/SF still find ⇔ ∨ ∇ ∞.
+        var cascade: [NSFontDescriptor] = []
+        if let defaults = CTFontCopyDefaultCascadeListForLanguages(base as CTFont, nil)
+            as? [NSFontDescriptor]
+        {
+            cascade.append(contentsOf: defaults)
+        }
+        var seen = Set(cascade.compactMap(\.postscriptName))
+        for name in ["Apple Symbols", "STIX Two Math", "Apple Color Emoji"] {
+            guard NSFont(name: name, size: size) != nil else { continue }
+            guard seen.insert(name).inserted else { continue }
+            cascade.append(NSFontDescriptor(name: name, size: size))
+        }
+        let descriptor = base.fontDescriptor.addingAttributes([
+            .cascadeList: cascade,
+        ])
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
+    /// Mona Sans VF instance. Width stays 100. Weight maps to 400/500/600/700.
+    /// Optical size is text (clamped 12–20) below 16pt and display (40 or 72) at 16pt+.
+    static func monaNSFont(
+        size: CGFloat,
+        weight: NSFont.Weight = .regular,
+        italic: Bool = false,
+        opticalSize: CGFloat? = nil
+    ) -> NSFont {
+        let opsz = opticalSize ?? monaOpticalSize(for: size)
+        let variation: [NSNumber: NSNumber] = [
+            fontAxisTag("wdth"): 100,
+            fontAxisTag("wght"): monaWeightAxis(weight),
+            fontAxisTag("opsz"): NSNumber(value: Double(opsz)),
+            fontAxisTag("ital"): italic ? 1 : 0,
+        ]
+        guard let registered = NSFont(name: "MonaSansVF-Regular", size: size)
+            ?? NSFont(name: "Mona Sans VF", size: size)
+        else {
+            return NSFont.systemFont(ofSize: size, weight: weight)
+        }
+        let descriptor = registered.fontDescriptor.addingAttributes([
+            .variation: variation,
+        ])
+        return NSFont(descriptor: descriptor, size: size) ?? registered
+    }
+
+    /// Text opsz tracks point size (clamped 12–20). Display uses 40 below 20pt and 72 at 20pt+.
+    static func monaOpticalSize(for size: CGFloat) -> CGFloat {
+        if size < 16 { return min(max(size, 12), 20) }
+        if size < 20 { return 40 }
+        return 72
+    }
+
+    private static func monaWeightAxis(_ weight: NSFont.Weight) -> NSNumber {
+        let value: Int
+        if weight >= .bold {
+            value = 700
+        } else if weight >= .semibold {
+            value = 600
+        } else if weight >= .medium {
+            value = 500
+        } else {
+            value = 400
+        }
+        return NSNumber(value: value)
+    }
+
+    static func fontAxisTag(_ name: String) -> NSNumber {
+        var tag: UInt32 = 0
+        for byte in name.utf8 {
+            tag = (tag << 8) | UInt32(byte)
+        }
+        return NSNumber(value: tag)
+    }
+
+    static func systemNSFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        cascadedNSFont(
+            base: NSFont.systemFont(ofSize: size, weight: weight),
+            size: size
+        )
+    }
+
+    /// Chrome face. Settings, menus, title bar, and sidebar controls use this.
+    static func sans(_ size: CGFloat, weight: NSFont.Weight = .regular) -> Font {
+        Font(systemNSFont(size: size, weight: weight) as CTFont)
+    }
+
+    /// Reading face. Composer, transcript markdown, and sidebar history titles.
+    static func mona(_ size: CGFloat, weight: NSFont.Weight = .regular) -> Font {
+        let base = monaNSFont(size: size, weight: weight)
+        return Font(cascadedNSFont(base: base, size: base.pointSize) as CTFont)
+    }
+
+    /// Composer field and transcript body — one point above chrome.
+    static func chatSans(_ size: CGFloat, weight: NSFont.Weight = .regular) -> Font {
+        mona(size + monaPointBump, weight: weight)
+    }
+
+    static let titleXL = sans(28, weight: .semibold)
+    static let heroSubtitle = sans(18)
+    static let pageTitle = sans(17, weight: .bold)
+    static let rowTitle = sans(15, weight: .semibold)
+    static let body13 = sans(13)
+    static let body14Semibold = sans(14, weight: .semibold)
+    static let cardCaption = sans(12.5)
+    static let composerText = chatSans(chatFontSize)
+    static let chatMono = Font(
+        cascadedNSFont(
+            base: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            size: 12
+        ) as CTFont
+    )
+    static let caption13 = sans(13)
+    static let sectionLabel = sans(12, weight: .semibold)
+
+    /// Registers the bundled Mona Sans variable font so chat type can instantiate it.
+    static func registerChatFonts() {
+        let url = Bundle.main.url(forResource: "MonaSansVF", withExtension: "ttf")
+            ?? Bundle.main.url(forResource: "MonaSansVF", withExtension: "ttf", subdirectory: "Fonts")
+        if let url {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
 }
 
 // MARK: - Reusable components
@@ -145,6 +291,56 @@ extension View {
     ) -> some View {
         modifier(StudioCardModifier(stroke: stroke, padding: padding, radius: radius))
     }
+
+    /// Quiet fill + hairline. Used instead of Liquid Glass on standing chrome
+    /// so sidebar animation and overlapping controls do not leave ghost copies.
+    func studioQuietFill<S: InsettableShape>(in shape: S) -> some View {
+        background(shape.fill(Color.fieldFill))
+            .overlay(shape.strokeBorder(Color.cardStroke, lineWidth: 1))
+    }
+
+    /// Icon chip that matches the model-picker capsule fill, stroke, and height.
+    func studioHeaderIconChip() -> some View {
+        frame(width: 16, height: 16)
+            .frame(width: Studio.headerChipHeight, height: Studio.headerChipHeight)
+            .studioQuietFill(in: Capsule())
+            .contentShape(Capsule())
+    }
+
+    /// Pointing hand while the pointer is over an enabled control.
+    func pointingHandCursor(enabled: Bool = true) -> some View {
+        onHover { inside in
+            if inside && enabled {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+}
+
+/// Fill appears only while hovered or pressed — no idle chrome.
+struct QuietHoverFillButtonStyle: ButtonStyle {
+    var cornerRadius: CGFloat = 10
+
+    func makeBody(configuration: Configuration) -> some View {
+        QuietHoverFillLabel(configuration: configuration, cornerRadius: cornerRadius)
+    }
+}
+
+private struct QuietHoverFillLabel: View {
+    let configuration: ButtonStyle.Configuration
+    var cornerRadius: CGFloat
+    @State private var hovered = false
+
+    var body: some View {
+        configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.fieldFill.opacity(hovered || configuration.isPressed ? 1 : 0))
+            }
+            .onHover { hovered = $0 }
+    }
 }
 
 /// Uppercase tracked section label above a card group.
@@ -154,10 +350,9 @@ struct SectionHeader: View {
     init(_ title: String) { self.title = title }
 
     var body: some View {
-        Text(title.uppercased())
+        Text(title)
             .font(Studio.sectionLabel)
-            .tracking(0.5)
-            .foregroundStyle(Color.subtitleGray)
+            .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -183,6 +378,8 @@ struct StudioSearchField: View {
     var ringOnFocusOnly: Bool = false
     /// Optional accessibility id for the inner TextField (UI tests).
     var accessibilityIdentifier: String? = nil
+    /// Magnifying-glass tint. Sidebar uses a darker Light-mode gray.
+    var chromeForeground: Color = .secondary
 
     @FocusState private var focused: Bool
     @State private var fieldFrame: CGRect = .zero
@@ -192,15 +389,16 @@ struct StudioSearchField: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(chromeForeground)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
+                .font(Studio.sans(13))
                 .focused($focused)
                 .modifier(OptionalAccessibilityIdentifier(accessibilityIdentifier))
         }
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous))
+        .studioQuietFill(in: RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous))
         .onGeometryChange(for: CGRect.self) { proxy in
             proxy.frame(in: .global)
         } action: { frame in
@@ -222,9 +420,12 @@ struct StudioSearchField: View {
             }
         }
         .overlay {
-            if let ringColor, !ringOnFocusOnly || focused {
+            if ringOnFocusOnly, focused {
                 RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous)
-                    .strokeBorder(ringColor, lineWidth: 1.5)
+                    .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1)
+            } else if let ringColor, !ringOnFocusOnly {
+                RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous)
+                    .strokeBorder(ringColor, lineWidth: 1)
             }
         }
     }
@@ -299,7 +500,7 @@ struct CapsuleBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold))
+            .font(Studio.sans(11, weight: .semibold))
             .foregroundStyle(tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -322,38 +523,18 @@ struct TintedCircleIcon: View {
     }
 }
 
-/// In-content page header for pushed pages: back chevron far left, centered title.
+/// In-content page header: centered title. Window back/forward live in the
+/// root overlay, so this header does not host chrome or shift with the sidebar.
 struct StudioPageHeader: View {
     let title: String
-    /// Pops the page (custom routing; there is no NavigationStack to dismiss).
-    var onBack: () -> Void = {}
-
-    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
 
     var body: some View {
-        ZStack {
-            HStack {
-                Button {
-                    onBack()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("backButton")
-                Spacer()
-            }
-            Text(title)
-                .font(Studio.pageTitle)
-        }
-        // With the sidebar collapsed the traffic lights sit over the detail
-        // pane's top-left corner; keep the back chevron clear of them.
-        .padding(.leading, sidebarCollapsed ? Studio.trafficLightClearance : 24)
-        .padding(.trailing, 24)
-        .padding(.top, 20)
-        .padding(.bottom, 12)
+        Text(title)
+            .font(Studio.pageTitle)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
     }
 }
 

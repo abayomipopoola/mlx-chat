@@ -95,4 +95,55 @@ import MLXVLM
         let config = #"{"model_type":"qwen3"}"#
         #expect(!ModelSupport.visionCapable(configJSON: json(config)))
     }
+
+    // MARK: - directoryHasWeights
+
+    @Test func directoryHasWeightsHappyPath() throws {
+        let dir = try makeWeightFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("config.json"))
+        try Data("weights".utf8).write(to: dir.appendingPathComponent("model.safetensors"))
+        #expect(ModelStore.directoryHasWeights(dir))
+    }
+
+    @Test func directoryHasWeightsRejectsMissingIndexShard() throws {
+        let dir = try makeWeightFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let index = #"{"weight_map":{"a.weight":"model-00001-of-00002.safetensors","b.weight":"model-00002-of-00002.safetensors"}}"#
+        try Data(index.utf8).write(to: dir.appendingPathComponent("model.safetensors.index.json"))
+        try Data("shard1".utf8).write(to: dir.appendingPathComponent("model-00001-of-00002.safetensors"))
+        #expect(!ModelStore.directoryHasWeights(dir))
+    }
+
+    @Test func directoryHasWeightsRejectsZeroByteShard() throws {
+        let dir = try makeWeightFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let index = #"{"weight_map":{"a.weight":"model-00001-of-00002.safetensors","b.weight":"model-00002-of-00002.safetensors"}}"#
+        try Data(index.utf8).write(to: dir.appendingPathComponent("model.safetensors.index.json"))
+        try Data().write(to: dir.appendingPathComponent("model-00001-of-00002.safetensors"))
+        try Data("shard2".utf8).write(to: dir.appendingPathComponent("model-00002-of-00002.safetensors"))
+        #expect(!ModelStore.directoryHasWeights(dir))
+    }
+
+    @Test func directoryHasWeightsRejectsSiblingPartial() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-weights-parent-\(UUID().uuidString)", isDirectory: true)
+        let dest = parent.appendingPathComponent("model", isDirectory: true)
+        let partial = parent.appendingPathComponent("model.partial", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: dest.appendingPathComponent("config.json"))
+        try Data("weights".utf8).write(to: dest.appendingPathComponent("model.safetensors"))
+        #expect(!ModelStore.directoryHasWeights(dest))
+    }
+
+    private func makeWeightFixtureDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-weights-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 }

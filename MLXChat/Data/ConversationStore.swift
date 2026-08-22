@@ -1,14 +1,30 @@
 import Foundation
+import os
 import SwiftData
+
+private let persistenceLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "org.mlxchat.MLXChat",
+    category: "persistence")
 
 /// CRUD + search over conversations. Owned by the main window; all access on the main actor.
 @MainActor
 @Observable
 final class ConversationStore {
     private let context: ModelContext
+    @ObservationIgnored
+    var onSaveError: ((Error) -> Void)?
+    @ObservationIgnored
+    var onSaveSuccess: (() -> Void)?
+    @ObservationIgnored
+    var saveExecutor: () throws -> Void
+    /// Conversation ids whose current title came from a greeting-only first
+    /// user message in this process. Not persisted; saved "hey" chats stay put.
+    @ObservationIgnored
+    private var greetingDerivedTitleIDs: Set<UUID> = []
 
     init(context: ModelContext) {
         self.context = context
+        self.saveExecutor = { [context] in try context.save() }
     }
 
     // MARK: - CRUD
@@ -17,20 +33,21 @@ final class ConversationStore {
     func newConversation() -> Conversation {
         let conversation = Conversation()
         context.insert(conversation)
-        try? context.save()
+        persist()
         return conversation
     }
 
     func delete(_ conversation: Conversation) {
         context.delete(conversation)
-        try? context.save()
+        persist()
     }
 
     func rename(_ conversation: Conversation, to title: String) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         conversation.title = trimmed
-        try? context.save()
+        greetingDerivedTitleIDs.remove(conversation.id)
+        persist()
     }
 
     @discardableResult
@@ -56,27 +73,76 @@ final class ConversationStore {
         context.insert(message)
         conversation.updatedAt = .now
         deriveTitleIfNeeded(for: conversation)
-        try? context.save()
+        persist()
         return message
     }
 
     func deleteMessage(_ message: ChatMessage) {
         context.delete(message)
-        try? context.save()
+        persist()
     }
 
     func save() {
-        try? context.save()
+        persist()
+    }
+
+    private func persist() {
+        do {
+            try saveExecutor()
+        } catch {
+            do { try saveExecutor() } catch {
+                persistenceLogger.error("SwiftData save failed: \(error.localizedDescription, privacy: .public)")
+                onSaveError?(error)
+                return
+            }
+        }
+        onSaveSuccess?()
     }
 
     // MARK: - Title derivation
 
-    /// "New Chat" -> first user message, word-boundary-trimmed to <= 50 chars + ellipsis when cut.
+    /// "New Chat" -> preferred user message, word-boundary-trimmed to <= 50 chars + ellipsis when cut.
+    /// A greeting-only title set in this process can upgrade when a later real message arrives.
     func deriveTitleIfNeeded(for conversation: Conversation) {
-        guard conversation.title == "New Chat",
-              let firstUser = conversation.orderedMessages.first(where: { $0.isUser })
+        let userMessages = conversation.orderedMessages.filter(\.isUser).map(\.content)
+        guard let source = Self.preferredTitleSource(userMessages) else { return }
+
+        if conversation.title == "New Chat" {
+            conversation.title = Self.derivedTitle(from: source)
+            if Self.isGreetingOnly(source) {
+                greetingDerivedTitleIDs.insert(conversation.id)
+            } else {
+                greetingDerivedTitleIDs.remove(conversation.id)
+            }
+            return
+        }
+
+        guard greetingDerivedTitleIDs.contains(conversation.id),
+              !Self.isGreetingOnly(source)
         else { return }
-        conversation.title = Self.derivedTitle(from: firstUser.content)
+        conversation.title = Self.derivedTitle(from: source)
+        greetingDerivedTitleIDs.remove(conversation.id)
+    }
+
+    nonisolated static func isGreetingOnly(_ text: String) -> Bool {
+        var normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        while let last = normalized.last, ".,!?…".contains(last) {
+            normalized.removeLast()
+        }
+        if ["hey", "hi", "hello", "yo", "sup", "thanks", "ok", "okay"].contains(normalized) {
+            return true
+        }
+        return normalized.count < 4
+    }
+
+    nonisolated static func preferredTitleSource(_ userMessages: [String]) -> String? {
+        if let firstReal = userMessages.first(where: { !isGreetingOnly($0) }) {
+            return firstReal
+        }
+        return userMessages.first
     }
 
     nonisolated static func derivedTitle(from text: String) -> String {

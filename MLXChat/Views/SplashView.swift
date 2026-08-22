@@ -14,7 +14,7 @@ struct SplashView: View {
                     .frame(width: 130, height: 130)
                     .shadow(color: .black.opacity(0.25), radius: 14, y: 6)
                 Text("MLX Chat")
-                    .font(.system(size: 28, weight: .semibold))
+                    .font(Studio.sans(28, weight: .semibold))
             }
         }
     }

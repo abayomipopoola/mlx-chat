@@ -6,20 +6,19 @@ final class AppLaunchUITests: MLXUITestCase {
 
     func testSidebarChromeExists() {
         XCTAssertTrue(app.buttons["newChatButton"].exists, "New chat row")
-        XCTAssertTrue(app.textFields["Search"].exists, "liquid-glass search field")
-        XCTAssertTrue(app.buttons["settingsGearButton"].exists, "settings gear in the top band")
+        XCTAssertTrue(app.textFields["Search"].exists, "sidebar search field")
+        XCTAssertTrue(app.buttons["settingsGearButton"].exists, "settings row at the bottom of the sidebar")
         XCTAssertTrue(conversationList.exists, "conversation list")
     }
 
     func testHeaderChromeExists() {
         XCTAssertTrue(app.buttons["modelPickerButton"].exists, "model capsule")
-        XCTAssertTrue(app.buttons["promptPresetButton"].exists, "prompt preset circle")
+        XCTAssertTrue(app.buttons["promptPresetButton"].exists, "prompt preset button")
     }
 
     func testComposerExists() {
         XCTAssertTrue(app.descendants(matching: .any)["composerField"].exists,
                       "composer text field")
         XCTAssertTrue(app.buttons["composerSendButton"].exists, "send button")
-        XCTAssertTrue(app.staticTexts["Runs 100% on-device • Private & offline"].exists)
     }
 }

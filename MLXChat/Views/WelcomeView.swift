@@ -2,16 +2,19 @@ import SwiftUI
 
 /// Empty-state hero with suggestion chips, matching the MLX Studio arrangement.
 struct WelcomeView: View {
+    var isEnabled: Bool = true
     let onTemplate: (String) -> Void
 
     private struct Chip: Identifiable {
-        let id = UUID()
         let title: String
         let subtitle: String
         let template: String
+        var id: String { title }
     }
 
-    private let chips: [Chip] = [
+    /// Stable identities: a new UUID per `WelcomeView` init made Liquid Glass
+    /// leave a ghost copy when the sidebar collapsed and the view redrew.
+    private static let chips: [Chip] = [
         .init(title: "Summarise", subtitle: "this text",
               template: "Could you please provide a concise summary of this text, highlighting the main points and key takeaways? Focus on the most important information while maintaining the core message."),
         .init(title: "Organise", subtitle: "my finances",
@@ -26,53 +29,58 @@ struct WelcomeView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            Image("SplashLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 110, height: 110)
-                .frame(height: 160)
-
             Text("What can I help with?")
                 .font(Studio.titleXL)
+                .multilineTextAlignment(.center)
 
-            LazyVGrid(
-                columns: [GridItem(.fixed(250), spacing: 12), GridItem(.fixed(250))],
-                spacing: 12
-            ) {
-                ForEach(chips) { chip in
-                    ChipButton(chip: chip) {
-                        onTemplate(chip.template)
-                    }
+            Grid(horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    chipButton(Self.chips[0])
+                    chipButton(Self.chips[1])
+                }
+                GridRow {
+                    chipButton(Self.chips[2])
+                    chipButton(Self.chips[3])
                 }
             }
-            .padding(.top, 44)
+            .geometryGroup()
+            .transaction { $0.animation = nil }
+            .padding(.top, 36)
 
-            Spacer()
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func chipButton(_ chip: Chip) -> some View {
+        ChipButton(chip: chip, isEnabled: isEnabled) {
+            onTemplate(chip.template)
+        }
+    }
+
     private struct ChipButton: View {
         let chip: Chip
+        var isEnabled: Bool = true
         let action: () -> Void
 
         var body: some View {
             Button(action: action) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(chip.title)
-                        .font(.system(size: 15, weight: .bold))
+                        .font(Studio.sans(15, weight: .bold))
                     Text(chip.subtitle)
-                        .font(.system(size: 13))
+                        .font(Studio.sans(13))
                         .foregroundStyle(Color.subtitleGray)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .frame(width: 250, alignment: .leading)
+                .studioQuietFill(in: RoundedRectangle(cornerRadius: Studio.radiusSuggestion, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Studio.radiusSuggestion, style: .continuous))
             }
             .buttonStyle(.plain)
+            .disabled(!isEnabled)
+            .accessibilityIdentifier("welcomeChip.\(chip.id)")
         }
     }
 }

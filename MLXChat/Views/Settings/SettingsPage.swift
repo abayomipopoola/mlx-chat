@@ -7,14 +7,12 @@ import SwiftUI
 /// White cards with hairline strokes.
 struct SettingsPage: View {
     @Environment(UpdateController.self) private var updates
-    /// Pops back to the chat (custom routing, no NavigationStack).
-    var onBack: () -> Void = {}
     /// Pushes the Manage Models page.
     var onManageModels: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
-            StudioPageHeader(title: "Settings", onBack: onBack)
+            StudioPageHeader(title: "Settings")
             if let version = updates.availableVersion {
                 UpdateBanner(version: version)
             }
@@ -67,7 +65,7 @@ private struct SettingsContent: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 18) {
                 section("Models") {
                     card { ManageModelsRow(onManageModels: onManageModels) }
                 }
@@ -176,7 +174,7 @@ private struct AutoUnloadCard: View {
                 .id(appearance)
             }
             Text("Frees RAM by unloading models after inactivity.")
-                .font(.caption)
+                .font(Studio.sans(10))
                 .foregroundStyle(.secondary)
         }
     }
@@ -210,7 +208,7 @@ private struct AppleIntelligenceCard: View {
         VStack(spacing: 0) {
             Button {
                 if availabilityMessage == nil {
-                    chat.selectedModelID = appleIntelligenceEngineID
+                    chat.selectModel(appleIntelligenceEngineID)
                 }
             } label: {
                 HStack(spacing: 12) {
@@ -239,7 +237,7 @@ private struct AppleIntelligenceCard: View {
                             }
                         }
                         Text(isAppleIntelligenceSelected ? "Using Apple Intelligence" : "Built-in AI, no download")
-                            .font(.subheadline)
+                            .font(Studio.sans(11))
                             .foregroundStyle(.secondary)
                     }
 
@@ -255,7 +253,7 @@ private struct AppleIntelligenceCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(availabilityMessage != nil)
+            .disabled(availabilityMessage != nil || chat.isStreaming)
             .accessibilityIdentifier("aiEngineCard")
 
             Divider()
@@ -264,7 +262,7 @@ private struct AppleIntelligenceCard: View {
                 Image(systemName: "info.circle")
                 Text(contextCaption)
             }
-            .font(.callout)
+            .font(Studio.sans(12))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
@@ -299,7 +297,7 @@ private struct ThemeRow: View {
                 .id(appearance)
             }
             Text("Follows the system appearance by default.")
-                .font(.caption)
+                .font(Studio.sans(10))
                 .foregroundStyle(.secondary)
         }
     }
@@ -308,13 +306,15 @@ private struct ThemeRow: View {
 // MARK: - Storage
 
 private struct StorageSection: View {
-    @State private var usedBytes: Int64 = 0
-    @State private var availableBytes: Int64 = 0
+    @Environment(ChatController.self) private var chat
+
+    private var usedBytes: Int64 { chat.modelStore.usedBytes }
+    private var availableBytes: Int64 { chat.modelStore.availableBytes }
+    private var capacityBytes: Int64 { chat.modelStore.totalBytes }
 
     private var usageFraction: Double {
-        let total = Double(usedBytes + availableBytes)
-        guard total > 0 else { return 0 }
-        return Double(usedBytes) / total
+        guard capacityBytes > 0 else { return 0 }
+        return min(1, Double(usedBytes) / Double(capacityBytes))
     }
 
     var body: some View {
@@ -365,7 +365,7 @@ private struct StorageSection: View {
                     ProgressView(value: usageFraction)
                         .tint(Color.brandGreen)
                     Text("\(format(availableBytes)) available")
-                        .font(.caption)
+                        .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -376,13 +376,7 @@ private struct StorageSection: View {
     }
 
     private func refreshUsage() {
-        Task {
-            let (used, available) = await Task.detached(priority: .utility) {
-                (ModelStore.diskUsageBytes(), ModelStore.availableBytes())
-            }.value
-            usedBytes = used
-            availableBytes = available
-        }
+        chat.modelStore.refreshStorageStats()
     }
 
     private func format(_ bytes: Int64) -> String {

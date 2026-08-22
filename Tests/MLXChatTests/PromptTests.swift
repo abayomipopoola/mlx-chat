@@ -1,32 +1,10 @@
 import Testing
 @testable import MLXChat
 
-/// Contract: PromptBuilder.systemPrompt gates custom-instruction injection on the
-/// personalization toggle (clamped to 1,000 chars), and trimmed(history:ctxTokens:)
+/// Contract: PromptBuilder.systemPrompt prepends a non-empty preset before
+/// basePrompt (nil/blank yields basePrompt alone), and trimmed(history:ctxTokens:)
 /// drops oldest pairs while always keeping the final pending message.
 @Suite struct PromptTests {
-    @Test func enabledInstructionsAreAppendedUnderHeader() {
-        let prompt = PromptBuilder.systemPrompt(
-            personalizationEnabled: true, customInstructions: "Always answer in French.")
-        #expect(prompt == PromptBuilder.basePrompt
-            + "\n\n# User's custom instructions\nAlways answer in French.")
-    }
-
-    @Test func disabledOrBlankInstructionsYieldBasePrompt() {
-        #expect(PromptBuilder.systemPrompt(personalizationEnabled: false, customInstructions: "x")
-            == PromptBuilder.basePrompt)
-        #expect(PromptBuilder.systemPrompt(personalizationEnabled: true, customInstructions: "   ")
-            == PromptBuilder.basePrompt)
-    }
-
-    @Test func overlongInstructionsAreClampedTo1000Chars() {
-        let prompt = PromptBuilder.systemPrompt(
-            personalizationEnabled: true,
-            customInstructions: String(repeating: "x", count: 1_500))
-        #expect(prompt == PromptBuilder.basePrompt
-            + "\n\n# User's custom instructions\n" + String(repeating: "x", count: 1_000))
-    }
-
     @Test func trimDropsOldestPairsAndKeepsSuffix() {
         let history = (0..<40).map { index in
             EngineMessage(
@@ -48,6 +26,24 @@ import Testing
         }
     }
 
+    @Test func fortyThousandContextKeepsMoreHistoryThanA32kCap() {
+        // Each message ≈ 100 tokens (400 chars). 250 messages ≈ 25_000 tokens —
+        // over a 32_768-capped 70% budget (~22_937) and under a 40k 70% budget (28_000).
+        let history = (0..<250).map { index in
+            EngineMessage(
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                text: String(repeating: "abcd", count: 100))
+        }
+        let trimmed = PromptBuilder.trimmed(history: history, ctxTokens: 40_000)
+        func tokens(_ message: EngineMessage) -> Int { (message.text.count + 3) / 4 }
+        let kept = trimmed.reduce(0) { $0 + tokens($1) }
+        let oldCapBudget = Int(Double(min(40_000, 32_768)) * 0.7)
+
+        #expect(trimmed.count == history.count)
+        #expect(kept > oldCapBudget)
+        #expect(trimmed.last?.text == history.last?.text)
+    }
+
     @Test func singleOversizedMessageIsNeverDropped() {
         let history = [EngineMessage(role: .user, text: String(repeating: "y", count: 200_000))]
 
@@ -59,28 +55,27 @@ import Testing
     }
 
     @Test func presetTextIsPrependedBeforeBasePrompt() {
-        let prompt = PromptBuilder.systemPrompt(
-            presetText: "X", personalizationEnabled: false, customInstructions: "")
+        let prompt = PromptBuilder.systemPrompt(presetText: "X")
         #expect(prompt == "X\n\n" + PromptBuilder.basePrompt)
     }
 
-    @Test func presetTextComposesWithInstructionsAppendix() {
-        let prompt = PromptBuilder.systemPrompt(
-            presetText: "X", personalizationEnabled: true, customInstructions: "Be brief.")
-        #expect(prompt == "X\n\n" + PromptBuilder.basePrompt
-            + "\n\n# User's custom instructions\nBe brief.")
+    @Test func nilOrBlankPresetTextMatchesOldBehavior() {
+        #expect(PromptBuilder.systemPrompt(presetText: nil)
+            == PromptBuilder.basePrompt)
+        #expect(PromptBuilder.systemPrompt(presetText: "  \n ")
+            == PromptBuilder.basePrompt)
     }
 
-    @Test func nilOrBlankPresetTextMatchesOldBehavior() {
-        #expect(PromptBuilder.systemPrompt(
-            presetText: nil, personalizationEnabled: false, customInstructions: "")
-            == PromptBuilder.basePrompt)
-        #expect(PromptBuilder.systemPrompt(
-            presetText: "  \n ", personalizationEnabled: false, customInstructions: "")
-            == PromptBuilder.basePrompt)
-        // Blank preset + enabled instructions still takes the pre-preset path exactly.
-        #expect(PromptBuilder.systemPrompt(
-            presetText: "   ", personalizationEnabled: true, customInstructions: "Be brief.")
-            == PromptBuilder.basePrompt + "\n\n# User's custom instructions\nBe brief.")
+    @Test func basePromptRequestsPlainFinalAnswersByDefault() {
+        #expect(PromptBuilder.basePrompt.contains("keep internal reasoning private"))
+        #expect(PromptBuilder.basePrompt.contains("Write the answer as chat text"))
+        #expect(PromptBuilder.basePrompt.contains("Do not wrap the whole answer in a markdown"))
+    }
+
+    @Test func appleIntelligencePromptForbidsAMarkdownFenceAroundTheReply() {
+        let prompt = AppleIntelligenceEngine.chatStylePrompt("Base rules.")
+        #expect(prompt.hasPrefix("Base rules.\n\n"))
+        #expect(prompt.contains("Write the reply as chat text"))
+        #expect(prompt.contains("Do not wrap the whole answer in a markdown"))
     }
 }

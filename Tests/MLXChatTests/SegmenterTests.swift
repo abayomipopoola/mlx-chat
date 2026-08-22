@@ -1,9 +1,11 @@
+import Foundation
 import Testing
 @testable import MLXChat
 
 /// Contract: MessageSegmenter.segment splits assistant markdown into markdown runs
 /// and artifact blocks (html/svg any size; other fences at >= 16 lines / >= 1200 chars),
-/// preserving small fences inline and flagging unterminated trailing fences.
+/// unwraps `md`/`markdown` fences into the chat body, preserving small fences inline
+/// and flagging unterminated trailing fences.
 @Suite struct SegmenterTests {
     @Test func largeCodeFenceBecomesArtifactBetweenMarkdownRuns() {
         let fenceBody = (["# Quicksort demo"] + (1...19).map { "line \($0)" })
@@ -76,6 +78,21 @@ import Testing
         #expect(artifact.title == "Python code")
     }
 
+    @Test func markdownFenceUnwrapsIntoChatBodyInsteadOfArtifact() {
+        let body = (["# Quick Go-Live Update"] + (1...16).map { "line \($0)" })
+            .joined(separator: "\n")
+        let text = "```markdown\n\(body)\n```"
+
+        let blocks = MessageSegmenter.segment(text)
+        guard blocks.count == 1, case .markdown(_, let markdown) = blocks[0] else {
+            Issue.record("expected a single markdown block, got \(blocks)")
+            return
+        }
+        #expect(markdown.contains("# Quick Go-Live Update"))
+        #expect(markdown.contains("line 16"))
+        #expect(!markdown.contains("```markdown"))
+    }
+
     @Test func longerCloserClosesAndShortBacktickLineDoesNot() {
         // "``" is content (too short to close); "````" (longer than the opener) closes.
         let text = "```html\n<p>x</p>\n``\ninside still\n````\nAfter"
@@ -102,5 +119,25 @@ import Testing
             == .milliseconds(260))
         #expect(StreamingRenderPolicy.flushInterval(characterCount: 20_000)
             == .milliseconds(350))
+    }
+
+    @MainActor
+    @Test func cachedSegmentsMatchSegmenterForSameIdAndContent() {
+        let cache = SegmentCache()
+        let id = UUID()
+        let content = "Intro paragraph.\n\nThat's the sort."
+        #expect(cache.segments(for: id, content: content) == MessageSegmenter.segment(content))
+        #expect(cache.segments(for: id, content: content) == MessageSegmenter.segment(content))
+    }
+
+    @MainActor
+    @Test func cachedSegmentsUpdateWhenContentGrows() {
+        let cache = SegmentCache()
+        let id = UUID()
+        let short = "Intro paragraph."
+        let longer = "Intro paragraph.\n\nThat's the sort."
+        _ = cache.segments(for: id, content: short)
+        let blocks = cache.segments(for: id, content: longer)
+        #expect(blocks == MessageSegmenter.segment(longer))
     }
 }

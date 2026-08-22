@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Downloads a Hugging Face model snapshot into the plain `~/Models/<org>/<name>/`
@@ -16,6 +17,7 @@ enum SnapshotDownloader {
         let remotePath: String
         let localPath: String
         let size: Int64
+        let sha256: String?
     }
 
     enum DownloadError: LocalizedError {
@@ -39,33 +41,145 @@ enum SnapshotDownloader {
         return name.hasSuffix(".safetensors") || name.hasSuffix(".json") || name.hasSuffix(".jinja")
     }
 
-    /// Lists the repo's files at `main` via the public tree API. The `size` field
-    /// carries the resolved LFS size, so it doubles as the progress weight.
+    /// Lists the repo's files at `main` via the public tree API. Follows RFC 8288
+    /// `Link: rel="next"` until that relation is absent. The `size` field carries
+    /// the resolved LFS size, so it doubles as the progress weight.
     static func listFiles(repoID: String, subfolder: String? = nil) async throws -> [RemoteFile] {
         guard var components = URLComponents(
             string: "https://huggingface.co/api/models/\(repoID)/tree/main") else {
             throw DownloadError.listFailed("bad repository id")
         }
         components.queryItems = [URLQueryItem(name: "recursive", value: "true")]
-        guard let url = components.url else { throw DownloadError.listFailed("bad repository id") }
+        guard let start = components.url else { throw DownloadError.listFailed("bad repository id") }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-        guard status == 200 else { throw DownloadError.listFailed("HTTP \(status)") }
-
-        struct Entry: Decodable { let path: String; let type: String; let size: Int64? }
-        let entries = try JSONDecoder().decode([Entry].self, from: data)
-        return entries
-            .compactMap { entry -> RemoteFile? in
-                guard entry.type == "file",
-                      let localPath = localPath(for: entry.path, subfolder: subfolder) else {
-                    return nil
-                }
-                return RemoteFile(
-                    remotePath: entry.path,
-                    localPath: localPath,
-                    size: entry.size ?? 0)
+        var collected: [RemoteFile] = []
+        var seen = Set<URL>()
+        var current: URL? = start
+        while let url = current, seen.insert(url.absoluteURL).inserted {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else { throw DownloadError.listFailed("HTTP \(status)") }
+            collected.append(contentsOf: try remoteFiles(fromTreeJSON: data, subfolder: subfolder))
+            if let http = response as? HTTPURLResponse,
+               let header = http.value(forHTTPHeaderField: "Link"),
+               let next = nextLink(from: header) {
+                current = URL(string: next, relativeTo: url)?.absoluteURL
+            } else {
+                current = nil
             }
+        }
+        return collected
+    }
+
+    /// RFC 8288 `Link` header: the URI-Reference of the first `rel="next"` link.
+    static func nextLink(from linkHeader: String) -> String? {
+        var rest = Substring(linkHeader)
+        while !rest.isEmpty {
+            rest = rest.drop(while: { $0.isWhitespace })
+            guard rest.first == "<", let close = rest.firstIndex(of: ">") else { return nil }
+            let uri = String(rest[rest.index(after: rest.startIndex)..<close])
+            rest = rest[rest.index(after: close)...]
+
+            var isNext = false
+            while !rest.isEmpty {
+                rest = rest.drop(while: { $0.isWhitespace })
+                if rest.first == "," {
+                    rest = rest.dropFirst()
+                    break
+                }
+                guard rest.first == ";" else { return isNext ? uri : nil }
+                rest = rest.dropFirst()
+                rest = rest.drop(while: { $0.isWhitespace })
+                let nameEnd = rest.firstIndex(where: { $0 == "=" || $0 == ";" || $0 == "," || $0.isWhitespace })
+                    ?? rest.endIndex
+                let name = rest[..<nameEnd].lowercased()
+                rest = rest[nameEnd...]
+                rest = rest.drop(while: { $0.isWhitespace })
+                var value = ""
+                if rest.first == "=" {
+                    rest = rest.dropFirst()
+                    rest = rest.drop(while: { $0.isWhitespace })
+                    if rest.first == "\"" {
+                        rest = rest.dropFirst()
+                        if let endQuote = rest.firstIndex(of: "\"") {
+                            value = String(rest[..<endQuote])
+                            rest = rest[rest.index(after: endQuote)...]
+                        }
+                    } else {
+                        let valueEnd = rest.firstIndex(where: { $0 == ";" || $0 == "," }) ?? rest.endIndex
+                        value = rest[..<valueEnd].trimmingCharacters(in: .whitespaces)
+                        rest = rest[valueEnd...]
+                    }
+                }
+                if name == "rel" {
+                    let rels = value.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+                    if rels.contains("next") { isNext = true }
+                }
+            }
+            if isNext { return uri }
+        }
+        return nil
+    }
+
+    /// True when the file's SHA-256 hex digest equals `expected` (optional `sha256:` prefix ignored).
+    static func fileSHA256(_ url: URL, matches expected: String) -> Bool {
+        guard let want = normalizedSHA256(expected),
+              let actual = sha256Hex(ofFileAt: url)
+        else { return false }
+        return actual.caseInsensitiveCompare(want) == .orderedSame
+    }
+
+    static func canReuseStagedFile(at url: URL, size: Int64, sha256: String?) -> Bool {
+        guard size > 0,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              ((attrs[.size] as? NSNumber)?.int64Value ?? -1) == size
+        else { return false }
+        guard let sha256 else { return true }
+        return fileSHA256(url, matches: sha256)
+    }
+
+    private static func remoteFiles(fromTreeJSON data: Data, subfolder: String?) throws -> [RemoteFile] {
+        struct LFS: Decodable { let oid: String? }
+        struct Entry: Decodable {
+            let path: String
+            let type: String
+            let size: Int64?
+            let lfs: LFS?
+        }
+        let entries = try JSONDecoder().decode([Entry].self, from: data)
+        return entries.compactMap { entry -> RemoteFile? in
+            guard entry.type == "file",
+                  let localPath = localPath(for: entry.path, subfolder: subfolder) else {
+                return nil
+            }
+            return RemoteFile(
+                remotePath: entry.path,
+                localPath: localPath,
+                size: entry.size ?? 0,
+                sha256: normalizedSHA256(entry.lfs?.oid))
+        }
+    }
+
+    static func normalizedSHA256(_ oid: String?) -> String? {
+        guard var value = oid?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        if value.lowercased().hasPrefix("sha256:") {
+            value = String(value.dropFirst(7))
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    private static func sha256Hex(ofFileAt url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = (try? handle.read(upToCount: 1024 * 1024)) ?? Data()
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// Selects one repository folder and removes that prefix locally. This lets
@@ -110,10 +224,8 @@ enum SnapshotDownloader {
             try Task.checkCancellation()
             let fileURL = staging.appendingPathComponent(file.localPath)
 
-            // Resume across restarts / re-clicks: a fully staged file is reused.
-            if file.size > 0,
-               let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-               (attrs[.size] as? Int64) == file.size {
+            // Resume across restarts / re-clicks: reuse only when size (and sha, if known) match.
+            if canReuseStagedFile(at: fileURL, size: file.size, sha256: file.sha256) {
                 completedBytes += file.size
                 onProgress(Double(completedBytes) / Double(totalBytes))
                 continue

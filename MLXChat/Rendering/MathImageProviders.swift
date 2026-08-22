@@ -1,56 +1,50 @@
 import AppKit
 import MarkdownUI
-import SwiftMath
+import SwaTex
+import SwaTexRender
 import SwiftUI
 
-/// Renders LaTeX to NSImage via SwiftMath, with caching and a never-blank fallback.
+/// Renders LaTeX to NSImage via SwaTex, with caching and a never-blank fallback.
 enum MathRenderer {
     private static let cache = NSCache<NSString, NSImage>()
+    private static let retinaScale: CGFloat = 2
 
-    static func render(base64URL encoded: String, display: Bool, boxed: Bool = false, fontSize: CGFloat, color: NSColor) -> NSImage {
-        let key = "\(display ? "d" : "i")|\(boxed ? "b" : "-")|\(fontSize)|\(color.description)|\(encoded)" as NSString
+    static func render(base64URL encoded: String, display: Bool, fontSize: CGFloat, color: NSColor) -> NSImage {
+        let key = "\(display ? "d" : "i")|\(fontSize)|\(color.description)|\(encoded)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
 
         let latex = MathPreprocessor.decodeBase64URL(encoded) ?? ""
-        // Text style even for display blocks: operators like Σ stay in scale
-        // with their operands instead of towering over them. (SwiftMath only
-        // honors \limits in display style, so side-set limits come with this.)
-        var renderer = MathImage(
-            latex: latex,
-            fontSize: fontSize,
-            textColor: color,
-            labelMode: .text,
-            textAlignment: .center)
-        let (error, image, _) = renderer.asImage()
+        let options = RenderOptions(fontSize: fontSize, padding: display ? 6 : 1)
+        let style: MathStyle = display ? .display : .text
+        let ink = swatexColor(from: color)
 
         let final: NSImage
-        if error == nil, let image {
-            final = boxed ? framed(image, color: color) : image
+        if let cgImage = try? ImageRenderer.image(
+            latex: latex,
+            style: style,
+            color: ink,
+            options: options,
+            displayScale: retinaScale
+        ) {
+            let pointSize = NSSize(
+                width: CGFloat(cgImage.width) / retinaScale,
+                height: CGFloat(cgImage.height) / retinaScale)
+            let image = NSImage(cgImage: cgImage, size: pointSize)
+            final = image
         } else {
-            // Invalid LaTeX: show the literal source rather than nothing.
             final = literalImage(text: latex.isEmpty ? "math" : latex, color: color)
         }
         cache.setObject(final, forKey: key)
         return final
     }
 
-    /// \boxed{…} emulation: SwiftMath has no \boxed support, so the box is
-    /// drawn around the already-rendered expression instead.
-    private static func framed(_ image: NSImage, color: NSColor) -> NSImage {
-        let padX: CGFloat = 6
-        let padY: CGFloat = 4
-        let size = NSSize(
-            width: image.size.width + padX * 2,
-            height: image.size.height + padY * 2)
-        return NSImage(size: size, flipped: false) { rect in
-            image.draw(in: NSRect(x: padX, y: padY, width: image.size.width, height: image.size.height))
-            let path = NSBezierPath(
-                roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
-            color.setStroke()
-            path.lineWidth = 1
-            path.stroke()
-            return true
-        }
+    private static func swatexColor(from color: NSColor) -> SwaTex.Color {
+        let rgb = color.usingColorSpace(.sRGB) ?? color
+        return SwaTex.Color(
+            r: Float(rgb.redComponent),
+            g: Float(rgb.greenComponent),
+            b: Float(rgb.blueComponent),
+            a: Float(rgb.alphaComponent))
     }
 
     private static func literalImage(text: String, color: NSColor) -> NSImage {
@@ -68,8 +62,7 @@ enum MathRenderer {
     }
 }
 
-/// Handles `swiftmath://i/<b64url>` and boxed `swiftmath://bi/<b64url>` inside
-/// lines of text.
+/// Handles `swiftmath://i/<b64url>` inside lines of text.
 struct MathInlineProvider: InlineImageProvider {
     let fontSize: CGFloat
     let color: NSColor
@@ -78,20 +71,17 @@ struct MathInlineProvider: InlineImageProvider {
 
     func image(with url: URL, label: String) async throws -> Image {
         guard url.scheme == "swiftmath" else { throw UnsupportedURL() }
-        let encoded = String(url.path.dropFirst())  // strip leading "/"
-        let host = url.host ?? ""
+        let encoded = String(url.path.dropFirst())
         let nsImage = MathRenderer.render(
             base64URL: encoded,
-            display: host == "d" || host == "bd",
-            boxed: host == "bi" || host == "bd",
+            display: (url.host ?? "") == "d",
             fontSize: fontSize,
             color: color)
         return Image(nsImage: nsImage)
     }
 }
 
-/// Handles `swiftmath://d/<b64url>` and boxed `swiftmath://bd/<b64url>` block
-/// images; renders other URLs as plain links (never fetches the network — privacy).
+/// Handles `swiftmath://d/<b64url>` block images; other URLs stay as links.
 struct MathBlockProvider: ImageProvider {
     let fontSize: CGFloat
     let color: NSColor
@@ -99,11 +89,9 @@ struct MathBlockProvider: ImageProvider {
     @ViewBuilder
     func makeImage(url: URL?) -> some View {
         if let url, url.scheme == "swiftmath" {
-            let host = url.host ?? ""
             let nsImage = MathRenderer.render(
                 base64URL: String(url.path.dropFirst()),
-                display: host == "d" || host == "bd",
-                boxed: host == "bi" || host == "bd",
+                display: (url.host ?? "") == "d",
                 fontSize: fontSize,
                 color: color)
             if nsImage.size.width > 720 {

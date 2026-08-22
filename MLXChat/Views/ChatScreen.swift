@@ -14,13 +14,12 @@ struct ChatScreen: View {
     @State private var atBottom = true
     @State private var userPausedAutoScroll = false
     @State private var userIsScrolling = false
-    @AppStorage(Keys.sidebarCollapsed) private var sidebarCollapsed = Keys.Defaults.sidebarCollapsed
 
     var body: some View {
         let messages = conversation?.orderedMessages ?? []
         VStack(spacing: 0) {
             if messages.isEmpty {
-                WelcomeView { template in
+                WelcomeView(isEnabled: !chat.isSelectedModelPreparing) { template in
                     draft = template
                     composerFocused = true
                     moveComposerCursorToEnd()
@@ -36,36 +35,17 @@ struct ChatScreen: View {
         .background(Color.detailBackground)
         .safeAreaInset(edge: .top, spacing: 0) {
             // Fixed header: opaque, so the transcript scrolls under it
-            // instead of sliding past the model picker.
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
-                    // With the sidebar collapsed the traffic lights sit over the
-                    // header's leading edge; the extra padding keeps the toggle
-                    // clear. When the sidebar is open, the toggle and the settings
-                    // gear live in the sidebar's top band instead.
-                    if sidebarCollapsed {
-                        Button {
-                            sidebarCollapsed.toggle()
-                        } label: {
-                            Image(systemName: "sidebar.left")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 34, height: 34)
-                                .glassEffect(.regular.interactive(), in: Circle())
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Show Sidebar (⌃⌘S)")
-                    }
-                    Spacer()
-                    ModelPickerMenu()
-                    if chat.selectedModelSupportsThinking {
-                        ThinkingToggle()
-                    }
-                    PromptPresetMenu()
+            // instead of sliding past the model picker. Window chrome lives
+            // on RootView, so this row stays put when the sidebar closes.
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                ModelPickerMenu()
+                if chat.selectedModelSupportsThinking {
+                    ThinkingToggle(canDisable: chat.selectedModelSupportsThinkingToggle)
                 }
+                PromptPresetMenu()
             }
-            .padding(.leading, sidebarCollapsed ? Studio.trafficLightClearance : 20)
+            .padding(.leading, 16)
             .padding(.trailing, 20)
             .padding(.top, 16)
             .padding(.bottom, 4)
@@ -73,12 +53,12 @@ struct ChatScreen: View {
             .background(Color.detailBackground)
         }
         .overlay(alignment: .topLeading) {
-            if let toast = chat.switchToast {
+            if let toast = chat.effectiveSwitchToast {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(Color.brandGreen)
                     Text(toast)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(Studio.sans(14, weight: .semibold))
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -90,7 +70,7 @@ struct ChatScreen: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeOut(duration: 0.25), value: chat.switchToast)
+        .animation(.easeOut(duration: 0.25), value: chat.effectiveSwitchToast)
         .onChange(of: conversation?.id) {
             atBottom = true
             userPausedAutoScroll = false
@@ -110,8 +90,7 @@ struct ChatScreen: View {
     ) -> TranscriptFingerprint {
         TranscriptFingerprint(
             messageCount: messages.count,
-            lastMessageID: messages.last?.id,
-            renderRevision: chat.transcriptRevision)
+            lastMessageID: messages.last?.id)
     }
 
     private func transcript(messages: [ChatMessage]) -> some View {
@@ -123,11 +102,23 @@ struct ChatScreen: View {
     }
 
     private func scrollBody(messages: [ChatMessage]) -> some View {
-        ScrollViewReader { proxy in
+        let lastMessageID = messages.last?.id
+        let streamingMessageID = chat.streamingMessageID
+        let isAnyStreaming = chat.isStreaming
+        let isInThinkPhase = chat.isInThinkPhase
+        return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 24) {
                     ForEach(messages) { message in
-                        MessageView(message: message, conversation: conversation)
+                        let isStreamingThis = streamingMessageID == message.id
+                        MessageView(
+                            message: message,
+                            isStreamingThis: isStreamingThis,
+                            isInThinkPhase: isStreamingThis && isInThinkPhase,
+                            isAnyStreaming: isAnyStreaming,
+                            modelDisplayName: message.modelID.map { chat.modelDisplayName(for: $0) },
+                            onRegenerate: regenerateAction(
+                                for: message, lastMessageID: lastMessageID))
                             .id(message.id)
                     }
                     Color.clear.frame(height: 1).id("chat-bottom")
@@ -140,14 +131,21 @@ struct ChatScreen: View {
             }
             .accessibilityIdentifier("transcriptScrollView")
             .defaultScrollAnchor(.bottom)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                Self.isNearBottom(geometry)
-            } action: { _, nowAtBottom in
-                atBottom = nowAtBottom
-                if nowAtBottom {
+            .onScrollGeometryChange(for: ScrollPinState.self) { geometry in
+                ScrollPinState(
+                    atBottom: Self.isNearBottom(geometry),
+                    contentHeight: geometry.contentSize.height)
+            } action: { old, new in
+                atBottom = new.atBottom
+                if new.atBottom {
                     userPausedAutoScroll = false
                 } else if userIsScrolling {
                     userPausedAutoScroll = true
+                }
+                if old.contentHeight != new.contentHeight,
+                   old.atBottom || new.atBottom
+                    || (isAnyStreaming && !userPausedAutoScroll) {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
             .onScrollPhaseChange { _, newPhase, context in
@@ -166,10 +164,26 @@ struct ChatScreen: View {
                     userIsScrolling = false
                 }
             }
+            .onAppear {
+                // History opens must show the first row. Anchoring to
+                // chat-bottom after a taller previous chat can leave the
+                // viewport past this transcript (empty pane until scroll).
+                if let firstID = messages.first?.id {
+                    proxy.scrollTo(firstID, anchor: .top)
+                } else {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
+            }
             .onChange(of: transcriptFingerprint(for: messages)) {
                 if atBottom || (chat.isStreaming && !userPausedAutoScroll) {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
+            }
+            .background {
+                ScrollPinner(
+                    proxy: proxy,
+                    atBottom: atBottom,
+                    userPausedAutoScroll: userPausedAutoScroll)
             }
             .overlay(alignment: .bottom) {
                 if !atBottom {
@@ -179,10 +193,12 @@ struct ChatScreen: View {
                         withAnimation { proxy.scrollTo("chat-bottom", anchor: .bottom) }
                     } label: {
                         Image(systemName: "arrow.down")
-                            .padding(8)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                            .studioQuietFill(in: Circle())
                     }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
+                    .buttonStyle(.plain)
                     .padding(.bottom, 10)
                 }
             }
@@ -213,12 +229,46 @@ struct ChatScreen: View {
             image: attachments.imageData,
             attachment: attachments.attachment)
     }
+
+    private func regenerateAction(
+        for message: ChatMessage,
+        lastMessageID: UUID?
+    ) -> (() -> Void)? {
+        guard let conversation,
+              message.id == lastMessageID,
+              !message.isUser
+        else { return nil }
+        return { chat.regenerate(message, in: conversation) }
+    }
 }
 
 private struct TranscriptFingerprint: Equatable {
     let messageCount: Int
     let lastMessageID: UUID?
-    let renderRevision: Int
+}
+
+private struct ScrollPinState: Equatable {
+    let atBottom: Bool
+    let contentHeight: CGFloat
+}
+
+/// Owns `transcriptRevision` so ChatScreen's body does not depend on it.
+/// Flushes still pin to the bottom under the existing pause rules.
+private struct ScrollPinner: View {
+    @Environment(ChatController.self) private var chat
+    let proxy: ScrollViewProxy
+    let atBottom: Bool
+    let userPausedAutoScroll: Bool
+
+    var body: some View {
+        Color.clear
+            .accessibilityHidden(true)
+            .onChange(of: chat.transcriptRevision) {
+                if atBottom || (chat.isStreaming && !userPausedAutoScroll) {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
+            }
+    }
 }
 
 /// Warns BEFORE sending when the selected engine cannot serve yet — on a
@@ -234,7 +284,7 @@ private struct EngineReadinessNotice: View {
                     Image(systemName: "hourglass")
                         .foregroundStyle(Color.iconOrange)
                     Text(message)
-                        .font(.system(size: 12.5))
+                        .font(Studio.sans(12.5))
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 14)
@@ -260,20 +310,40 @@ private struct EngineReadinessNotice: View {
 /// Bulb toggle for thinking-capable models: lit purple when the model may
 /// think, slashed gray when thinking is switched off.
 private struct ThinkingToggle: View {
+    let canDisable: Bool
     @AppStorage(Keys.thinkingEnabled) private var enabled = Keys.Defaults.thinkingEnabled
 
+    private var isEnabled: Bool { canDisable ? enabled : true }
+
+    @ViewBuilder
     var body: some View {
-        Button {
-            enabled.toggle()
-        } label: {
-            Image(systemName: enabled ? "lightbulb.fill" : "lightbulb.slash")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(enabled ? Color.iconPurple : .secondary)
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: Circle())
-                .contentShape(Circle())
+        if canDisable {
+            Button {
+                enabled.toggle()
+            } label: {
+                bulbIcon()
+            }
+            .buttonStyle(.plain)
+            .help(helpText)
+            .accessibilityLabel("Thinking")
+        } else {
+            bulbIcon()
+                .help(helpText)
+                .accessibilityLabel("Thinking is always on")
         }
-        .buttonStyle(.plain)
-        .help(enabled ? "Thinking is on — click to turn off" : "Thinking is off — click to turn on")
+    }
+
+    private func bulbIcon() -> some View {
+        Image(systemName: isEnabled ? "lightbulb.fill" : "lightbulb.slash")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(isEnabled ? Color.iconPurple : .secondary)
+            .studioHeaderIconChip()
+    }
+
+    private var helpText: String {
+        guard canDisable else { return "Thinking is always on for this model" }
+        return enabled
+            ? "Thinking is on — click to turn off"
+            : "Thinking is off — click to turn on"
     }
 }

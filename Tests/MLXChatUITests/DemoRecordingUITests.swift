@@ -5,6 +5,11 @@ import XCTest
 /// Not a regression suite — waits/existence only, to keep the path reliable.
 final class DemoRecordingUITests: MLXUITestCase {
 
+    private let qatSourceModelID =
+        "mlx-community/gemma-4-26B-A4B-it-qat-4bit"
+    private let qatStreamedModelID =
+        "streamed-moe/gemma-4-26b-a4b-it-qat-4bit"
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         // Launch is owned by the walkthrough so demo-specific args apply.
@@ -17,6 +22,176 @@ final class DemoRecordingUITests: MLXUITestCase {
     }
 
     // MARK: - Walkthrough
+
+    func testCaptureDeterministicReleaseVideoFrames() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(
+            environment["RELEASE_VIDEO_CAPTURE"] == "1"
+                || environment["TEST_RUNNER_RELEASE_VIDEO_CAPTURE"] == "1",
+            "Set TEST_RUNNER_RELEASE_VIDEO_CAPTURE=1 to capture release frames")
+
+        launchCapture(extraArguments: selectedSSDDemoArguments)
+        XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 8))
+        captureWindow(named: "01-new-chat")
+
+        launchCapture(extraArguments: selectedSSDDemoArguments + ["--open-model-dropdown"])
+        XCTAssertTrue(app.staticTexts["Select model"].waitForExistence(timeout: 8))
+        captureWindow(named: "02-model-picker")
+
+        launchCapture(extraArguments: ["--route", "models", "--seed-streamed-demo-models"])
+        XCTAssertTrue(app.staticTexts["Manage Models"].waitForExistence(timeout: 8))
+        captureWindow(named: "03-manage-models")
+
+        launchCapture(extraArguments: ["--route", "models"])
+        openGemmaFamily()
+        captureWindow(named: "04-gemma-family")
+
+        launchCapture(extraArguments: ["--route", "models"])
+        openGemmaFamily()
+        openQATDownloadSheet()
+        XCTAssertEqual(
+            app.descendants(matching: .any)["downloadMode.mlx"].value as? String,
+            "Selected")
+        captureWindow(named: "05-download-choices")
+
+        launchCapture(extraArguments: ["--route", "models"])
+        openGemmaFamily()
+        openQATDownloadSheet()
+        let ssdMode = app.descendants(matching: .any)["downloadMode.ssd"]
+        XCTAssertTrue(ssdMode.waitForExistence(timeout: 5))
+        ssdMode.click()
+        XCTAssertTrue(app.staticTexts["Runtime balance"].waitForExistence(timeout: 5))
+        captureWindow(named: "06-ssd-runtime-balance")
+
+        launchCapture(extraArguments: selectedSSDDemoArguments + ["--seed-moe-demo-prompt"])
+        XCTAssertTrue(
+            app.staticTexts["Does a larger expert cache make the SSD model smarter?"]
+                .waitForExistence(timeout: 8))
+        captureWindow(named: "07-cache-question")
+
+        launchCapture(extraArguments: selectedSSDDemoArguments + ["--seed-moe-demo-answer"])
+        XCTAssertTrue(app.staticTexts["Thought for 7s"].waitForExistence(timeout: 8))
+        XCTAssertTrue(
+            app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "No."))
+                .firstMatch.exists)
+        captureWindow(named: "08-cache-answer")
+    }
+
+    func testCaptureChromeAndOrnithFrames() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(
+            environment["RELEASE_VIDEO_CAPTURE"] == "1"
+                || environment["TEST_RUNNER_RELEASE_VIDEO_CAPTURE"] == "1",
+            "Set TEST_RUNNER_RELEASE_VIDEO_CAPTURE=1 to capture release frames")
+
+        launchCapture(extraArguments: ornithChromeArguments)
+        XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 8))
+        captureWindow(named: "01-new-chat")
+
+        launchCapture(extraArguments: ornithChromeArguments + ["--open-model-dropdown"])
+        XCTAssertTrue(app.staticTexts["Select model"].waitForExistence(timeout: 8))
+        captureWindow(named: "02-model-picker")
+
+        launchCapture(extraArguments: ornithChromeArguments + [
+            "--seed-ornith-html-preview",
+            "--expand-artifacts",
+        ])
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "HTML"))
+            .firstMatch.waitForExistence(timeout: 8))
+        hold(2.0)
+        captureWindow(named: "03-html-preview")
+
+        launchCapture(extraArguments: ornithChromeLightArguments + [
+            "--seed-ornith-html-preview",
+            "--expand-artifacts",
+        ])
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "HTML"))
+            .firstMatch.waitForExistence(timeout: 8))
+        hold(2.0)
+        captureWindow(named: "04-html-preview-light")
+    }
+
+    /// Square set v2: one coherent session. Apple Intelligence is selected, the
+    /// SSD Ornith 35B is picked from the menu, the switch is held, and every
+    /// answer after that is attributed to the model that was chosen.
+    /// One square-set frame: the seeded gradient-descent conversation.
+    func testCaptureGradientDescentChat() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(
+            environment["RELEASE_VIDEO_CAPTURE"] == "1"
+                || environment["TEST_RUNNER_RELEASE_VIDEO_CAPTURE"] == "1",
+            "Set TEST_RUNNER_RELEASE_VIDEO_CAPTURE=1 to capture release frames")
+
+        launchCapture(extraArguments: ornithChromeArguments + ["--seed-demo"])
+        XCTAssertTrue(
+            app.staticTexts["Explain how gradient descent works, with the key math."]
+                .waitForExistence(timeout: 10))
+        hold(2.5)
+        captureWindow(named: "05-gradient-descent")
+    }
+
+    func testCaptureSSDSessionFrames() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(
+            environment["RELEASE_VIDEO_CAPTURE"] == "1"
+                || environment["TEST_RUNNER_RELEASE_VIDEO_CAPTURE"] == "1",
+            "Set TEST_RUNNER_RELEASE_VIDEO_CAPTURE=1 to capture release frames")
+
+        // 01 — the picker, with Apple Intelligence still selected.
+        //
+        // Apple Intelligence cannot be the *launch* selection: the window is then
+        // never ordered onscreen (reproducible with `open -n` too). So launch on a
+        // local model, switch to Apple Intelligence through the menu, and reopen.
+        launchCapture(extraArguments: ssdOrnithArguments)
+        XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 10))
+        let picker = app.descendants(matching: .any)["modelPickerButton"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 6))
+        picker.click()
+        let appleRow = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Apple Intelligence"))
+            .firstMatch
+        XCTAssertTrue(appleRow.waitForExistence(timeout: 6))
+        appleRow.click()
+        hold(1.0)
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Select model"].waitForExistence(timeout: 6))
+        hold(0.8)
+        captureWindow(named: "01-picker-apple")
+
+        // 02 — the SSD model chosen, still loading into RAM.
+        launchCapture(extraArguments: ssdOrnithArguments + ["--fake-model-loading"])
+        XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 8))
+        hold(1.0)
+        captureWindow(named: "02-loading")
+
+        // 03 — the answer, from the model that was selected.
+        launchCapture(extraArguments: ssdOrnithArguments + ["--seed-demo-ssd"])
+        XCTAssertTrue(
+            app.staticTexts["Explain how gradient descent works, with the key math."]
+                .waitForExistence(timeout: 10))
+        hold(2.5)
+        captureWindow(named: "03-gradient-descent")
+
+        // 04/05 — the live HTML artifact, same model, dark then light.
+        launchCapture(extraArguments: ssdOrnithArguments + [
+            "--seed-html-preview-ssd",
+            "--expand-artifacts",
+        ])
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "HTML"))
+            .firstMatch.waitForExistence(timeout: 8))
+        hold(2.0)
+        captureWindow(named: "04-html-preview")
+
+        launchCapture(extraArguments: ssdOrnithLightArguments + [
+            "--seed-html-preview-ssd",
+            "--expand-artifacts",
+        ])
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "HTML"))
+            .firstMatch.waitForExistence(timeout: 8))
+        hold(2.0)
+        captureWindow(named: "05-html-preview-light")
+    }
 
     func testRecordDemoWalkthrough() throws {
         try XCTSkipUnless(
@@ -63,9 +238,9 @@ final class DemoRecordingUITests: MLXUITestCase {
         if newChat.waitForExistence(timeout: 3) {
             newChat.click()
         } else {
-            // Fallback: File-menu New Chat is ⌃N.
+            // Fallback: File-menu New Chat is ⌘N.
             conversationList.click()
-            app.typeKey("n", modifierFlags: .control)
+            app.typeKey("n", modifierFlags: .command)
         }
         _ = app.staticTexts["What can I help with?"].waitForExistence(timeout: 4)
         hold(1.5)
@@ -124,6 +299,128 @@ final class DemoRecordingUITests: MLXUITestCase {
     }
 
     // MARK: - Pacing helpers
+
+    /// Streamed-MoE models available, Apple Intelligence still selected.
+    private var appleIntelligenceArguments: [String] {
+        [
+            // Without a seeded model list the window is never ordered onscreen
+            // when Apple Intelligence is the selection.
+            "--seed-streamed-demo-models",
+            "-selectedModelID", "apple-intelligence",
+            "-appearance", "dark",
+        ]
+    }
+
+    private var ssdOrnithArguments: [String] {
+        [
+            "--seed-streamed-demo-models",
+            "-selectedModelID", "streamed-moe/ornith-1.5-35b-a3b-4bit",
+            "-appearance", "dark",
+        ]
+    }
+
+    private var ssdOrnithLightArguments: [String] {
+        [
+            "--seed-streamed-demo-models",
+            "-selectedModelID", "streamed-moe/ornith-1.5-35b-a3b-4bit",
+            "-appearance", "light",
+        ]
+    }
+
+    private var ornithChromeArguments: [String] {
+        [
+            "--seed-ornith-demo-model",
+            "-selectedModelID", "ornith-ai/Ornith-1.5-9B-MLX-4bit",
+            "-appearance", "dark",
+        ]
+    }
+
+    private var ornithChromeLightArguments: [String] {
+        [
+            "--seed-ornith-demo-model",
+            "-selectedModelID", "ornith-ai/Ornith-1.5-9B-MLX-4bit",
+            "-appearance", "light",
+        ]
+    }
+
+    private var selectedSSDDemoArguments: [String] {
+        [
+            "--seed-streamed-demo-models",
+            "-selectedModelID", qatStreamedModelID,
+        ]
+    }
+
+    private func launchCapture(extraArguments: [String]) {
+        app?.terminate()
+        app = XCUIApplication()
+        app.launchArguments = [
+            "--capture-release-video",
+            "--capture-hide-history",
+            "--sidebar-expanded",
+        ] + extraArguments
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 12))
+        app.activate()
+        resizeCaptureWindow()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 8))
+        hold(1.5)
+    }
+
+    private func openGemmaFamily() {
+        let family = app.descendants(matching: .any)["familyCard.gemma4"]
+        XCTAssertTrue(family.waitForExistence(timeout: 6))
+        family.click()
+        XCTAssertTrue(app.staticTexts["Gemma 4"].waitForExistence(timeout: 5))
+    }
+
+    private func openQATDownloadSheet() {
+        let download = app.descendants(matching: .any)[
+            "downloadModel.\(qatSourceModelID)"
+        ]
+        if !download.isHittable {
+            app.scrollViews["modelsScrollView"].swipeUp()
+        }
+        XCTAssertTrue(download.waitForExistence(timeout: 5))
+        XCTAssertTrue(download.isHittable)
+        download.click()
+        XCTAssertTrue(app.staticTexts["Gemma 4 26B A4B QAT"].waitForExistence(timeout: 5))
+    }
+
+    private func captureWindow(named name: String) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.exists)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.97)).hover()
+        hold(0.8)
+        let attachment = XCTAttachment(screenshot: window.screenshot())
+        attachment.name = "\(name).png"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func resizeCaptureWindow() {
+        let script = """
+        tell application "System Events"
+          set procs to every process whose bundle identifier is "org.mlxchat.MLXChat"
+          repeat with p in procs
+            try
+              set frontmost of p to true
+              repeat with w in windows of p
+                try
+                  set position of w to {80, 80}
+                  set size of w to {900, 776}
+                end try
+              end repeat
+            end try
+          end repeat
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+        process.waitUntilExit()
+        hold(0.5)
+    }
 
     private func hold(_ seconds: TimeInterval) {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))

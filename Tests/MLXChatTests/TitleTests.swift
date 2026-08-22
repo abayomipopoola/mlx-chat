@@ -38,4 +38,37 @@ import Testing
         #expect(ConversationStore.derivedTitle(from: "") == "New Chat")
         #expect(ConversationStore.derivedTitle(from: "  \n\t ") == "New Chat")
     }
+
+    @Test func isGreetingOnlyRecognizesShortGreetings() {
+        #expect(ConversationStore.isGreetingOnly("hey"))
+        #expect(ConversationStore.isGreetingOnly("Hey!"))
+        #expect(ConversationStore.isGreetingOnly(" HI \n"))
+        #expect(ConversationStore.isGreetingOnly("ok"))
+        #expect(ConversationStore.isGreetingOnly("yo?"))
+        #expect(ConversationStore.isGreetingOnly("hm"))
+    }
+
+    @Test func isGreetingOnlyRejectsRealMessages() {
+        #expect(!ConversationStore.isGreetingOnly("hey, fix my build"))
+        #expect(!ConversationStore.isGreetingOnly("hello world"))
+        #expect(!ConversationStore.isGreetingOnly("help"))
+    }
+
+    @Test func preferredTitleSourceSkipsLeadingGreeting() {
+        #expect(
+            ConversationStore.preferredTitleSource(["hey", "fix the build error"])
+                == "fix the build error")
+    }
+
+    @Test func preferredTitleSourceFallsBackToFirstGreeting() {
+        #expect(ConversationStore.preferredTitleSource(["hey", "hi"]) == "hey")
+    }
+
+    @Test func preferredTitleSourceKeepsFirstRealMessage() {
+        #expect(ConversationStore.preferredTitleSource(["explain monads"]) == "explain monads")
+    }
+
+    @Test func preferredTitleSourceEmptyIsNil() {
+        #expect(ConversationStore.preferredTitleSource([]) == nil)
+    }
 }

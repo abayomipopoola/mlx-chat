@@ -12,9 +12,31 @@ final class EngineRuntime {
         case loading(id: String, fraction: Double)
         case ready(id: String)
         case generating(id: String)
+
+        /// True while this model is still being fetched or pulled into RAM.
+        func isPreparing(_ modelID: String) -> Bool {
+            switch self {
+            case .downloading(let id), .loading(let id, _):
+                return id == modelID
+            case .empty, .ready, .generating:
+                return false
+            }
+        }
     }
 
     private(set) var state: EngineState = .empty
+
+    /// UI-verification hook: hold a mid-load state for screenshots.
+    var effectiveState: EngineState {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--fake-loading-model"),
+           index + 1 < arguments.count {
+            return .loading(id: arguments[index + 1], fraction: 0.45)
+        }
+#endif
+        return state
+    }
     private(set) var lastUsedAt = Date.now
 
     private let modelStore: ModelStore
@@ -113,15 +135,34 @@ final class EngineRuntime {
                     }
                 }
             } catch {
-                modelEngine = nil
-                state = .empty
+                loadDidFail(engine)
                 throw error
             }
         }
 
+        try loadDidSucceed(engine, id: id)
+        return engine
+    }
+
+    /// Places `engine` in the single RAM slot without loading weights.
+    func installSlot(_ engine: ChatEngine) {
+        modelEngine = engine
+        state = .loading(id: engine.id, fraction: 0)
+    }
+
+    /// A cancelled or failed load clears the slot only while it still owns it.
+    func loadDidFail(_ engine: ChatEngine) {
+        if modelEngine === engine {
+            modelEngine = nil
+            state = .empty
+        }
+    }
+
+    /// Stale success must not stamp `.ready` for a prior model over a successor.
+    func loadDidSucceed(_ engine: ChatEngine, id: String) throws {
+        guard modelEngine === engine else { throw CancellationError() }
         state = .ready(id: id)
         lastUsedAt = .now
-        return engine
     }
 
     func beginGenerating(id: String) {

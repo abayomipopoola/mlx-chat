@@ -86,6 +86,7 @@ final class StreamedMoEEngine: ChatEngine {
                         history: history,
                         systemPrompt: systemPrompt,
                         temperature: temperature,
+                        conversationID: conversationID,
                         onEvent: { continuation.yield($0) })
                     continuation.yield(.completed(tokensPerSecond: tokensPerSecond))
                     continuation.finish()
@@ -115,6 +116,7 @@ private actor StreamedMoESession {
     }
 
     private var loadedState: LoadedState?
+    private var kvCache: StreamedMoEKVCacheState?
 
     func load(
         directory: URL,
@@ -176,6 +178,7 @@ private actor StreamedMoESession {
         history: [EngineMessage],
         systemPrompt: String,
         temperature: Double,
+        conversationID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async throws -> Double? {
         guard let loadedState else {
@@ -215,23 +218,46 @@ private actor StreamedMoESession {
             topK: 64,
             topP: 0.95)
 
-        let result = try await runRawCompletion(
-            producer: runner,
-            tokenizer: tokenizer,
-            promptIds: promptIDs,
-            config: config,
-            context: context,
-            scratch: scratch
-        ) { progress in
-            switch progress {
-            case .prefill:
-                break
-            case .token(_, let tokenID, let delta):
-                eventRouter.consume(tokenID: tokenID, delta: delta, emit: onEvent)
-            case .tail(let text):
-                eventRouter.consumeTail(text, emit: onEvent)
-            }
+        var start = StreamedMoEKVReusePolicy.start(
+            newPromptIDs: promptIDs,
+            cache: kvCache,
+            conversationID: conversationID,
+            systemPrompt: systemPrompt,
+            thinkingEnabled: thinkingEnabled)
+        if case .resume = start, !(runner is any ContinuableLogitProducer) {
+            start = .reset
         }
+
+        let result: RawDecodeResult
+        do {
+            result = try await runRawCompletion(
+                producer: runner,
+                tokenizer: tokenizer,
+                promptIds: promptIDs,
+                config: config,
+                context: context,
+                scratch: scratch,
+                start: start
+            ) { progress in
+                switch progress {
+                case .prefill:
+                    break
+                case .token(_, let tokenID, let delta):
+                    eventRouter.consume(tokenID: tokenID, delta: delta, emit: onEvent)
+                case .tail(let text):
+                    eventRouter.consumeTail(text, emit: onEvent)
+                }
+            }
+        } catch {
+            kvCache = nil
+            throw error
+        }
+
+        kvCache = StreamedMoEKVCacheState(
+            conversationID: conversationID,
+            systemPrompt: systemPrompt,
+            thinkingEnabled: thinkingEnabled,
+            kvTokenIDs: result.kvBackedTokenIDs)
 
         eventRouter.finish(emit: onEvent)
         return result.decodeSeconds > 0

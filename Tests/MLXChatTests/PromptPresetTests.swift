@@ -78,4 +78,9 @@ struct PromptPresetTests {
             #expect(PromptPresets.selected == .custom)
         }
     }
+
+    @Test func generalPresetAsksForChatTextNotAMarkdownFile() {
+        #expect(PromptPreset.general.defaultText.contains("chat text"))
+        #expect(!PromptPreset.general.defaultText.contains("Use markdown formatting"))
+    }
 }

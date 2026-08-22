@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import HuggingFace
 import MLXLMCommon
@@ -65,6 +66,14 @@ final class ModelStore {
     private(set) var customModels: [CatalogModel]
     var lastError: String?
 
+#if DEBUG
+    /// In-memory availability for native release-video captures. This never
+    /// creates files, registers bookmarks, or changes a normal app launch.
+    private let usesSeededDemoAvailability: Bool
+    private let seededDemoModelIDs: Set<String>
+    private let extraSeededAvailableIDs: Set<String>
+#endif
+
     private var downloadTasks: [String: Task<Void, Never>] = [:]
     private var streamedInstallTasks: [String: Task<Void, Never>] = [:]
     private var streamedInstallers: [String: StreamedModelInstaller] = [:]
@@ -78,11 +87,44 @@ final class ModelStore {
     /// Cached `ModelSupport.unsupportedReason(modelID:)` results; entry
     /// invalidated when a download finishes or the model is deleted.
     private var unsupportedReasonCache: [String: String?] = [:]
+    /// Disk-probe cache for the local MLX layout. Hits and misses are stored.
+    /// Bumping `availabilityRevision` makes `@Observable` re-render views.
+    private let availabilityCache = ModelAvailabilityCache()
+    private var availabilityRevision = 0
+    @ObservationIgnored
+    private var becomeActiveObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private var becomeActiveDebounceTask: Task<Void, Never>?
+    /// Last completed storage-stat snapshot. Refreshed off-main.
+    private(set) var usedBytes: Int64 = 0
+    private(set) var availableBytes: Int64 = 0
+    private(set) var totalBytes: Int64 = 0
 
     init() {
 #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        // Exactly the four models the release-video dropdown shows: one dense
+        // Liquid model, one dense Gemma, and the two SSD-streamed installs.
+        let seedsPickerDemo = arguments.contains("--seed-picker-demo")
+        usesSeededDemoAvailability =
+            seedsPickerDemo || arguments.contains("--seed-streamed-demo-models")
+        if seedsPickerDemo {
+            seededDemoModelIDs = [
+                "LiquidAI/LFM2.5-2.6B-MLX@bf16",
+                StreamedMoEInstall.ornith15.modelID,
+                "mlx-community/gemma-4-12B-it-4bit",
+                StreamedMoEInstall.standard.modelID,
+            ]
+        } else {
+            seededDemoModelIDs = usesSeededDemoAvailability
+                ? Set(StreamedMoEInstall.variants.map(\.modelID))
+                : []
+        }
+        extraSeededAvailableIDs = arguments.contains("--seed-ornith-demo-model")
+            ? ["ornith-ai/Ornith-1.5-9B-MLX-4bit"]
+            : []
         let seededCustomModels: [CatalogModel]? =
-            ProcessInfo.processInfo.arguments.contains("--seed-imported-models")
+            arguments.contains("--seed-imported-models")
             ? [
                 ModelCatalog.importedModel(
                     repoID: "mlx-community/Imported-Regression-4bit")
@@ -97,7 +139,7 @@ final class ModelStore {
         } else if let data = UserDefaults.standard.data(forKey: Keys.customModels),
            let models = try? JSONDecoder().decode([CatalogModel].self, from: data) {
             let upgraded = models
-                .map(ModelCatalog.applyingKnownCapabilities)
+                .map { ModelCatalog.applyingKnownCapabilities(to: $0) }
                 .filter { ModelCatalog.model(for: $0.id) == nil }
             customModels = upgraded
             if upgraded != models, let encoded = try? JSONEncoder().encode(upgraded) {
@@ -109,13 +151,15 @@ final class ModelStore {
         restoreStreamedModelDirectories()
         restoreManagedStreamedModelDirectory()
         try? FileManager.default.createDirectory(at: Self.hubCacheDirectory, withIntermediateDirectories: true)
+        refreshStorageStats()
+        observeApplicationActivation()
     }
 
     /// Catalog plus imported entries, in display order.
     var allModels: [CatalogModel] { ModelCatalog.models + customModels }
 
     func model(for id: String) -> CatalogModel? {
-        allModels.first { $0.id == id }
+        allModels.first { $0.id == id }.map { ModelCatalog.applyingKnownCapabilities(to: $0) }
     }
 
     // MARK: - Local availability
@@ -132,8 +176,37 @@ final class ModelStore {
     nonisolated static func directoryHasWeights(_ url: URL) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.appendingPathComponent("config.json").path) else { return false }
+        let siblingPartial = url.deletingLastPathComponent()
+            .appendingPathComponent(url.lastPathComponent + ".partial", isDirectory: true)
+        if fm.fileExists(atPath: siblingPartial.path) { return false }
+
+        let indexURL = url.appendingPathComponent("model.safetensors.index.json")
+        if fm.fileExists(atPath: indexURL.path) {
+            guard let data = try? Data(contentsOf: indexURL),
+                  let index = try? JSONDecoder().decode(SafetensorsWeightIndex.self, from: data)
+            else { return false }
+            return index.weightMap.values.allSatisfy { shard in
+                regularFileHasPositiveSize(url.appendingPathComponent(shard))
+            }
+        }
+
         let contents = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
-        return contents.contains { $0.hasSuffix(".safetensors") }
+        return contents.contains { name in
+            name.hasSuffix(".safetensors")
+                && regularFileHasPositiveSize(url.appendingPathComponent(name))
+        }
+    }
+
+    private nonisolated static func regularFileHasPositiveSize(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        return size > 0
+    }
+
+    private struct SafetensorsWeightIndex: Decodable {
+        let weightMap: [String: String]
+        enum CodingKeys: String, CodingKey { case weightMap = "weight_map" }
     }
 
     /// Loadable MLX directory: plain layout wins, hub snapshot second.
@@ -148,14 +221,31 @@ final class ModelStore {
     }
 
     func availableDirectory(for id: String) -> URL? {
+        _ = availabilityRevision
         if StreamedMoEInstall.variant(forStreamedModelID: id) != nil {
             return streamedModelRegistrations[id]?.directory
         }
-        return Self.localMLXModelDirectory(for: id)
+        return availabilityCache.directory(for: id)
     }
 
     func isAvailable(_ id: String) -> Bool {
-        availableDirectory(for: id) != nil
+#if DEBUG
+        if extraSeededAvailableIDs.contains(id) { return true }
+        if usesSeededDemoAvailability {
+            return seededDemoModelIDs.contains(id)
+        }
+#endif
+        return availableDirectory(for: id) != nil
+    }
+
+    private func invalidateAvailability(for id: String) {
+        availabilityCache.invalidate(id)
+        availabilityRevision &+= 1
+    }
+
+    private func invalidateModelLookupCaches(for id: String) {
+        unsupportedReasonCache.removeValue(forKey: id)
+        invalidateAvailability(for: id)
     }
 
     func hasManagedStreamedModelFiles(_ id: String) -> Bool {
@@ -307,7 +397,8 @@ final class ModelStore {
             await MainActor.run { [weak self] in
                 self?.downloadProgress[id] = nil
                 self?.downloadTasks[id] = nil
-                self?.unsupportedReasonCache.removeValue(forKey: id)
+                self?.invalidateModelLookupCaches(for: id)
+                self?.refreshStorageStats()
             }
         }
         downloadTasks[id] = task
@@ -340,19 +431,40 @@ final class ModelStore {
     @discardableResult
     func delete(_ id: String) -> String? {
         if let variant = StreamedMoEInstall.variant(forStreamedModelID: id) {
-            return removeStreamedModel(id, variant: variant)
+            let message = removeStreamedModel(id, variant: variant)
+            refreshStorageStats()
+            return message
         }
+        var artifacts: [URL] = []
         if let plain = Self.plainDirectory(for: id) {
-            try? FileManager.default.removeItem(at: plain)
-            let staging = plain.deletingLastPathComponent()
-                .appendingPathComponent(plain.lastPathComponent + ".partial", isDirectory: true)
-            try? FileManager.default.removeItem(at: staging)
+            artifacts.append(plain)
+            artifacts.append(
+                plain.deletingLastPathComponent()
+                    .appendingPathComponent(plain.lastPathComponent + ".partial", isDirectory: true))
         }
         if let hub = Self.hubRepoDirectory(for: id) {
-            try? FileManager.default.removeItem(at: hub)
+            artifacts.append(hub)
         }
-        unsupportedReasonCache.removeValue(forKey: id)
-        return nil
+        let fileManager = FileManager.default
+        do {
+            try Self.moveExistingManagedArtifactsToTrash(
+                artifacts,
+                fileExists: { fileManager.fileExists(atPath: $0) },
+                moveToTrash: { url in
+                    try fileManager.trashItem(at: url, resultingItemURL: nil)
+                })
+            invalidateModelLookupCaches(for: id)
+            refreshStorageStats()
+            lastError = nil
+            return nil
+        } catch {
+            invalidateModelLookupCaches(for: id)
+            refreshStorageStats()
+            let name = model(for: id)?.displayName ?? id
+            let message = "Could not move \(name) to Trash: \(error.localizedDescription)"
+            lastError = message
+            return message
+        }
     }
 
     private func removeStreamedModel(
@@ -380,11 +492,12 @@ final class ModelStore {
                 unregisterStreamedModel(id)
                 streamedInstallProgressByModelID[id] = nil
                 streamedInstallErrors[id] = nil
-                unsupportedReasonCache.removeValue(forKey: id)
+                invalidateModelLookupCaches(for: id)
                 streamedStorageRevision &+= 1
                 lastError = nil
                 return nil
             } catch {
+                invalidateAvailability(for: id)
                 streamedStorageRevision &+= 1
                 let message = "Could not move \(variant.displayName) to Trash: \(error.localizedDescription)"
                 lastError = message
@@ -433,6 +546,7 @@ final class ModelStore {
         // weights — the load path enforces the same gate via ModelSupport.
         // Also sniffs vision capability so imported VLMs persist supportsVision.
         let supportsVision: Bool
+        let configJSON: Data
         do {
             let url = URL(string: "https://huggingface.co/\(trimmed)/raw/main/config.json")!
             let (data, response) = try await URLSession.shared.data(from: url)
@@ -443,10 +557,13 @@ final class ModelStore {
                 return reason
             }
             supportsVision = ModelSupport.visionCapable(configJSON: data)
+            configJSON = data
         } catch {
             return "Could not verify the model config: \(error.localizedDescription)"
         }
-        customModels.append(ModelCatalog.importedModel(repoID: trimmed, supportsVision: supportsVision))
+        customModels.append(
+            ModelCatalog.importedModel(
+                repoID: trimmed, supportsVision: supportsVision, configJSON: configJSON))
         persistCustomModels()
         download(trimmed)
         return nil
@@ -562,7 +679,7 @@ final class ModelStore {
             downloadedBytes: variant.approximateDownloadBytes,
             totalBytes: variant.approximateDownloadBytes)
         streamedInstallErrors[variant.modelID] = nil
-        unsupportedReasonCache.removeValue(forKey: variant.modelID)
+        invalidateModelLookupCaches(for: variant.modelID)
         return nil
     }
 
@@ -598,7 +715,7 @@ final class ModelStore {
             var bookmarks = Self.persistedStreamedModelBookmarks()
             bookmarks[modelID] = bookmark
             Self.persistStreamedModelBookmarks(bookmarks)
-            unsupportedReasonCache.removeValue(forKey: modelID)
+            invalidateModelLookupCaches(for: modelID)
             lastError = nil
             streamedInstallErrors[modelID] = nil
             return nil
@@ -620,7 +737,7 @@ final class ModelStore {
         var bookmarks = Self.persistedStreamedModelBookmarks()
         bookmarks.removeValue(forKey: id)
         Self.persistStreamedModelBookmarks(bookmarks)
-        unsupportedReasonCache.removeValue(forKey: id)
+        invalidateModelLookupCaches(for: id)
     }
 
     private func restoreStreamedModelDirectories() {
@@ -633,7 +750,7 @@ final class ModelStore {
         for (id, bookmark) in bookmarks {
             guard let variant = StreamedMoEInstall.variant(
                 forStreamedModelID: id) else { continue }
-            guard let directory = Self.resolveStreamedModelBookmark(bookmark) else { continue }
+            guard let directory = Self.resolveStreamedModelBookmark(bookmark, id: id) else { continue }
             let openedSecurityScope = directory.startAccessingSecurityScopedResource()
             guard StreamedMoEInstall.validationError(
                 at: directory,
@@ -682,13 +799,44 @@ final class ModelStore {
         Self.persistManagedStreamedModelPreferences(preferences)
     }
 
-    private nonisolated static func resolveStreamedModelBookmark(_ data: Data) -> URL? {
+    private nonisolated static func resolveStreamedModelBookmark(_ data: Data, id: String) -> URL? {
         var stale = false
-        return try? URL(
-            resolvingBookmarkData: data,
-            options: [.withSecurityScope, .withoutUI],
-            relativeTo: nil,
-            bookmarkDataIsStale: &stale)
+        let url: URL
+        do {
+            url = try URL(
+                resolvingBookmarkData: data,
+                options: [.withSecurityScope, .withoutUI],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale)
+        } catch {
+            dropPersistedStreamedModelBookmark(id)
+            return nil
+        }
+        if stale {
+            refreshStaleStreamedModelBookmark(url, id: id)
+        }
+        return url
+    }
+
+    private nonisolated static func dropPersistedStreamedModelBookmark(_ id: String) {
+        var bookmarks = persistedStreamedModelBookmarks()
+        bookmarks.removeValue(forKey: id)
+        persistStreamedModelBookmarks(bookmarks)
+    }
+
+    private nonisolated static func refreshStaleStreamedModelBookmark(_ url: URL, id: String) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+        }
+        guard let replacement = try? url.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil)
+        else { return }
+        var bookmarks = persistedStreamedModelBookmarks()
+        bookmarks[id] = replacement
+        persistStreamedModelBookmarks(bookmarks)
     }
 
     private nonisolated static func persistedStreamedModelBookmarks() -> [String: Data] {
@@ -717,7 +865,49 @@ final class ModelStore {
         UserDefaults.standard.set(data, forKey: Keys.managedStreamedModelPreferences)
     }
 
+    // MARK: - External ~/Models refresh
+
+    /// Re-probe `~/Models` after the user may have added or removed files
+    /// while the app was in the background. No filesystem watcher.
+    func noteExternalModelDirectoryMayHaveChanged() {
+        availabilityCache.invalidateAll()
+        availabilityRevision &+= 1
+        refreshStorageStats()
+    }
+
+    private func observeApplicationActivation() {
+        becomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.scheduleExternalModelDirectoryRefresh()
+            }
+        }
+    }
+
+    private func scheduleExternalModelDirectoryRefresh() {
+        becomeActiveDebounceTask?.cancel()
+        becomeActiveDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.noteExternalModelDirectoryMayHaveChanged()
+        }
+    }
+
     // MARK: - Storage stats
+
+    func refreshStorageStats() {
+        Task {
+            let (used, available, total) = await Task.detached(priority: .utility) {
+                (Self.diskUsageBytes(), Self.availableBytes(), Self.volumeCapacityBytes())
+            }.value
+            usedBytes = used
+            availableBytes = available
+            totalBytes = total
+        }
+    }
 
     /// Sum of regular-file sizes under `~/Models`, skipping symlinks
     /// (hub snapshots symlink into blobs; counting both would double the total).
@@ -740,5 +930,10 @@ final class ModelStore {
     nonisolated static func availableBytes() -> Int64 {
         let values = try? modelsRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         return values?.volumeAvailableCapacityForImportantUsage ?? 0
+    }
+
+    nonisolated static func volumeCapacityBytes() -> Int64 {
+        let values = try? modelsRoot.resourceValues(forKeys: [.volumeTotalCapacityKey])
+        return Int64(values?.volumeTotalCapacity ?? 0)
     }
 }

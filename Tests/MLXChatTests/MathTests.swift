@@ -1,10 +1,11 @@
+import AppKit
 import Testing
 @testable import MLXChat
 
 /// Contract: MathPreprocessor rewrites LaTeX spans to swiftmath:// image links
-/// (inline `i`, display `d` on its own paragraph, boxed variants `bi`/`bd`),
-/// leaves money amounts and inline code untouched, and base64url survives a
-/// round trip.
+/// (inline `i`, display `d` on its own paragraph), leaves money amounts and
+/// inline code untouched, and base64url survives a round trip. SwaTex keeps
+/// KaTeX commands (`\tfrac`, `\implies`, `\boxed`) as written.
 @Suite struct MathTests {
     /// Extracts the base64url payload of the first `swiftmath://<host>/…)` link.
     private func payload(host: String, in output: String) -> String? {
@@ -19,6 +20,27 @@ import Testing
         #expect(output.contains("swiftmath://i/"))
         #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
             == "e^{i\\pi}+1=0")
+    }
+
+    @Test func dollarPipeAbsBecomesInlineImage() {
+        let output = MathPreprocessor.preprocess("$|Pos(B) - Pos(D)| = 1$")
+        #expect(output.contains("swiftmath://i/"))
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "|Pos(B) - Pos(D)| = 1")
+    }
+
+    @Test func dollarPipeAbsInProseBecomesInlineImage() {
+        let output = MathPreprocessor.preprocess(
+            "So $|Pos(B) - Pos(D)| = 1$ and we are done.")
+        #expect(output.contains("So "))
+        #expect(output.contains("swiftmath://i/"))
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "|Pos(B) - Pos(D)| = 1")
+    }
+
+    @Test func unpairedProsePipeDollarSpanStaysLiteral() {
+        let input = "choose $a | b$ here"
+        #expect(MathPreprocessor.preprocess(input) == input)
     }
 
     @Test func moneyAmountsStayUntouched() {
@@ -57,6 +79,101 @@ import Testing
         #expect(MathPreprocessor.preprocess(input) == input)
     }
 
+    @Test func nestedListImpliesBecomesInlineImage() {
+        let input = """
+            1. Premise
+                - Check P: $Q=R \\implies T=T$.
+            """
+        let output = MathPreprocessor.preprocess(input)
+        #expect(output.contains("swiftmath://i/"))
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "Q=R \\implies T=T")
+        #expect(!output.contains("$Q=R"))
+    }
+
+    @Test func q1ProseLogicUnicodeStaysText() {
+        let input = "P ⇔ (Q = R) and Q ⇔ (¬P ∨ S) so S ⇔ ¬R."
+        let output = MathPreprocessor.preprocess(input)
+        #expect(output.contains("⇔"))
+        #expect(output.contains("∨"))
+        #expect(!output.contains("swiftmath://"))
+    }
+
+    @Test func dollarLogicUnicodeBecomesMathImage() {
+        let output = MathPreprocessor.preprocess("$P ⇔ Q$")
+        #expect(output.contains("swiftmath://i/"))
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("⇔"))
+        #expect(output.components(separatedBy: "swiftmath://i/").count == 2)
+    }
+
+    @Test func impliesStaysImplies() {
+        let output = MathPreprocessor.preprocess("$Q=R \\implies T=T$")
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\implies"))
+    }
+
+    @Test func replacementCharacterIsNotMapped() {
+        let input = "P \u{FFFD} (Q = R)"
+        #expect(MathPreprocessor.preprocess(input) == input)
+    }
+
+    @Test func nestedListNeqBecomesInlineImage() {
+        let input = """
+            1. Premise
+                - $Q \\neq R$
+            """
+        let output = MathPreprocessor.preprocess(input)
+        #expect(output.contains("swiftmath://i/"))
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\neq"))
+    }
+
+    @Test func dollarSpanAllowsSpaceAfterOpeningDollar() {
+        let output = MathPreprocessor.preprocess(
+            "$ \\neg P \\lor S \\implies F \\lor F = \\text{False}$")
+        #expect(output.contains("swiftmath://i/"))
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\neg"))
+        #expect(decoded.contains("\\text{False}"))
+        #expect(!decoded.hasPrefix(" "))
+    }
+
+    @Test func nestedListSimpleEqualsIsMathItalic() {
+        let input = """
+            1. Premise
+                - $Q=R$
+            """
+        let output = MathPreprocessor.preprocess(input)
+        #expect(!output.contains("$"))
+        #expect(output.unicodeScalars.contains { $0.value >= 0x1D434 && $0.value <= 0x1D467 })
+    }
+
+    @Test func twoSpaceListItemMathStillTransforms() {
+        let input = """
+            - parent
+              - $Q \\neq R$
+            """
+        let output = MathPreprocessor.preprocess(input)
+        #expect(output.contains("swiftmath://i/"))
+        #expect(!output.contains("$Q"))
+    }
+
+    @Test func nestedNumberedListMathStillTransforms() {
+        let input = """
+            1. Premise
+                1. $x=1$
+            """
+        let output = MathPreprocessor.preprocess(input)
+        #expect(!output.contains("$"))
+        #expect(output.unicodeScalars.contains { $0.value >= 0x1D434 && $0.value <= 0x1D467 })
+    }
+
+    @Test func englishAndBetweenTwoDollarSpansStaysLiteral() {
+        let input = "pick $x and $y"
+        #expect(MathPreprocessor.preprocess(input) == input)
+    }
+
     @Test func accidentallyIndentedMathProseDoesNotExposeProviderURLsAsCode() {
         let input = """
                 The first term converges to $F(n)=\\frac{3}{4}+\\epsilon_n$.
@@ -88,28 +205,26 @@ import Testing
             == "x_1")
     }
 
-    @Test func bareBoxedBecomesBoxedInlineImage() {
-        // The reported bug: models end answers with `\boxed{…}` and no math
-        // delimiters — it must render boxed, not leak raw LaTeX.
+    @Test func bareBoxedBecomesInlineImage() {
         let output = MathPreprocessor.preprocess("The answer is \\boxed{73682}.")
         #expect(output.contains("The answer is "))
-        #expect(output.contains("swiftmath://bi/"))
-        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
-            == "73682")
+        #expect(output.contains("swiftmath://i/"))
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\\boxed{73682}")
     }
 
-    @Test func dollarWrappedBoxedBecomesBoxedInlineImage() {
+    @Test func dollarWrappedBoxedBecomesInlineImage() {
         let output = MathPreprocessor.preprocess("Answer: $\\boxed{73682}$")
-        #expect(output.contains("swiftmath://bi/"))
-        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
-            == "73682")
+        #expect(output.contains("swiftmath://i/"))
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\\boxed{73682}")
     }
 
-    @Test func displayBoxedBecomesBoxedDisplayImage() {
+    @Test func displayBoxedKeepsBoxedCommand() {
         let output = MathPreprocessor.preprocess("$$\\boxed{x}$$")
-        #expect(output.contains("swiftmath://bd/"))
-        #expect(payload(host: "bd", in: output).flatMap(MathPreprocessor.decodeBase64URL)
-            == "x")
+        #expect(output.contains("swiftmath://d/"))
+        #expect(payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\\boxed{x}")
     }
 
     @Test func bracketMathEmbeddedInTextLineRendersInline() {
@@ -118,8 +233,8 @@ import Testing
         let output = MathPreprocessor.preprocess(
             "So the whole update rule in one line: \\[\\boxed{\\theta_{t+1} = \\theta_t - \\eta\\,\\nabla L(\\theta_t)}\\]")
         #expect(output.contains("So the whole update rule in one line: "))
-        #expect(output.contains("swiftmath://bi/"))
-        #expect(!output.contains("swiftmath://bd/"))
+        #expect(output.contains("swiftmath://i/"))
+        #expect(!output.contains("swiftmath://d/"))
     }
 
     @Test func dollarDisplayEmbeddedInTextLineRendersInline() {
@@ -135,19 +250,16 @@ import Testing
             == "\n\\int_0^1 x\\,dx\n")
     }
 
-    @Test func boxedEmbeddedInDisplayMathIsStripped() {
-        // SwiftMath has no \boxed: inside a larger expression keep the content
-        // so the surrounding math still renders.
+    @Test func boxedEmbeddedInDisplayMathIsKept() {
         let output = MathPreprocessor.preprocess("$$x = \\boxed{5}$$")
-        #expect(!output.contains("swiftmath://bd/"))
         #expect(payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL)
-            == "x = 5")
+            == "x = \\boxed{5}")
     }
 
     @Test func nestedBracesInsideBoxedSurvive() {
         let output = MathPreprocessor.preprocess("\\boxed{\\frac{1}{2}}")
-        #expect(payload(host: "bi", in: output).flatMap(MathPreprocessor.decodeBase64URL)
-            == "\\frac{1}{2}")
+        #expect(payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL)
+            == "\\boxed{\\frac{1}{2}}")
     }
 
     @Test func boxedInsideInlineCodeIsUntouched() {
@@ -170,5 +282,81 @@ import Testing
         #expect(!encoded.contains("/"))
         #expect(!encoded.contains("="))
         #expect(MathPreprocessor.decodeBase64URL(encoded) == text)
+    }
+
+    @Test func boxedDisplayKeepsTfrac() {
+        let output = MathPreprocessor.preprocess(
+            "$$\\boxed{\\text{Batch } n \\text{ fee} = \\tfrac{3}{4} - \\frac{2n+3}{2(n+1)(n+2)}}$$")
+        #expect(output.contains("swiftmath://d/"))
+        let decoded = payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\tfrac{3}{4}"))
+        #expect(decoded.contains("\\text{Batch }"))
+        #expect(decoded.contains("\\boxed{"))
+    }
+
+    @Test func displayKeepsDfracAndLim() {
+        let output = MathPreprocessor.preprocess(
+            "$$\\lim_{N\\to\\infty} a(N) = \\frac34 \\cdot \\frac{6}{\\pi^2} = \\boxed{\\dfrac{9}{2\\pi^2}}$$")
+        #expect(output.contains("swiftmath://d/"))
+        let decoded = payload(host: "d", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\dfrac{9}{2\\pi^2}"))
+        #expect(decoded.contains("\\lim"))
+        #expect(!output.contains("$"))
+    }
+
+    @Test func unicodeSigmaWithScriptsBecomesSumImage() {
+        let output = MathPreprocessor.preprocess(
+            "Fee of batch n = Σ_{k=1}^{n} 1/(k(k+2)).")
+        #expect(output.contains("swiftmath://i/"))
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\sum_{k=1}^{n}"))
+        #expect(!output.contains("Σ_{k=1}^{n}"))
+    }
+
+    @Test func unicodeSigmaNestedPredicateBecomesSumImage() {
+        let output = MathPreprocessor.preprocess("Nested Σ_{n≤N, n not sf}")
+        #expect(output.contains("swiftmath://i/"))
+        let decoded = payload(host: "i", in: output).flatMap(MathPreprocessor.decodeBase64URL) ?? ""
+        #expect(decoded.contains("\\sum_{n≤N, n not sf}"))
+    }
+
+    @Test func loneUnicodeSigmaStaysLiteral() {
+        let input = "variance Σ is"
+        #expect(MathPreprocessor.preprocess(input) == input)
+        #expect(!MathPreprocessor.preprocess(input).contains("swiftmath://"))
+    }
+
+    @Test func q1SeedAnswerKeepsBareLogicUnicode() {
+        let answer = """
+            # Q1 — Logic
+            - **P:** P ⇔ (Q = R), i.e., P ⇔ (Q ⇔ R)
+            - **Q:** Q ⇔ (¬P ∨ S)
+            - **S:** S ⇔ ¬R
+            Q ⇔ (¬P ∨ S). With S = T, (¬P ∨ T) is always True.
+            """
+        let output = MathPreprocessor.preprocess(answer)
+        #expect(output.contains("⇔"))
+        #expect(output.contains("∨"))
+        #expect(!output.contains("swiftmath://"))
+    }
+
+    @Test func katexCommandsRender() {
+        let fallback = MathRenderer.render(
+            base64URL: MathPreprocessor.base64URL("\\notARealLatexCommandZZZ"),
+            display: false,
+            fontSize: 28,
+            color: .white)
+        for latex in ["\\iff", "\\lor", "\\land", "\\neg", "\\implies", "\\tfrac{1}{2}", "\\boxed{1}"] {
+            let image = MathRenderer.render(
+                base64URL: MathPreprocessor.base64URL(latex),
+                display: false,
+                fontSize: 28,
+                color: .white)
+            #expect(image.size.width > 8, "\(latex) image too narrow")
+            #expect(image.size.height > 8, "\(latex) image too short")
+            #expect(
+                image.size.width < fallback.size.width,
+                "\(latex) should render as a symbol, not the raw command string")
+        }
     }
 }

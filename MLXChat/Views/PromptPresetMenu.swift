@@ -34,9 +34,7 @@ struct PromptPresetMenu: View {
             Image(systemName: current.icon)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(tint(for: current))
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: Circle())
-                .contentShape(Circle())
+                .studioHeaderIconChip()
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("promptPresetButton")
@@ -91,7 +89,7 @@ struct PromptPresetPanel: View {
         VStack(alignment: .leading, spacing: 2) {
             // Top title, matching the model picker's "Model" label.
             Text("Prompt")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Studio.sans(11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 20)
                 .padding(.bottom, 2)
@@ -105,7 +103,7 @@ struct PromptPresetPanel: View {
                 dropdown.open = nil
             } label: {
                 Label("Edit \(current.displayName) Prompt…", systemImage: "pencil")
-                    .font(.system(size: 13))
+                    .font(Studio.sans(13))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
@@ -134,7 +132,7 @@ struct PromptPresetPanel: View {
                         .foregroundStyle(tint(for: preset))
                         .frame(width: 16)
                     Text(preset.displayName)
-                        .font(.system(size: 13))
+                        .font(Studio.sans(13))
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -169,7 +167,7 @@ struct EditPromptSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             Text("Edit \(preset.displayName) Prompt")
-                .font(.headline)
+                .font(Studio.sans(13, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
 
@@ -177,11 +175,11 @@ struct EditPromptSheet: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("\(preset.displayName) Prompt")
-                    .font(.title3.bold())
+                    .font(Studio.sans(15, weight: .bold))
                 Text(preset == .custom
                     ? "Write your own prompt. It is sent at the start of every conversation to set the AI's behavior and personality."
                     : "This prompt is sent at the start of every conversation to set the AI's behavior and personality.")
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -199,9 +197,9 @@ struct EditPromptSheet: View {
 
             HStack {
                 Text("Temperature")
-                    .font(.callout.weight(.semibold))
+                    .font(Studio.sans(12, weight: .semibold))
                 Text("Applies to all prompts")
-                    .font(.caption)
+                    .font(Studio.sans(10))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Picker("", selection: $temperature) {
@@ -220,7 +218,7 @@ struct EditPromptSheet: View {
 
             HStack {
                 Text("\(text.count) characters")
-                    .font(.callout)
+                    .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Reset to Default") { text = preset.defaultText }

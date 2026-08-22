@@ -130,7 +130,19 @@ enum StreamedMoEInstall {
         approximateDownloadBytes: 19_529_025_048,
         architecture: .qwen36)
 
-    static let variants = [standard, qat, qwen36]
+    static let ornith15 = StreamedMoEVariant(
+        modelID: "streamed-moe/ornith-1.5-35b-a3b-4bit",
+        sourceRepoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+        sourceRevision: "19504d912fa8fc7622bf6b1de3db5d5d890b1f02",
+        sourceIndexSHA256: "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36",
+        displayName: "Ornith 1.5 35B A3B",
+        quantLabel: "4-bit · SSD",
+        helperModelArgument: "ornith15",
+        managedDirectoryName: "Ornith-1.5-35B-A3B.gturbo",
+        approximateDownloadBytes: 19_528_808_680,
+        architecture: .qwen36)
+
+    static let variants = [standard, qat, qwen36, ornith15]
 
     /// Bookmark key used by the first streamed-MoE build, before the streamed
     /// install received its own app-local identity.

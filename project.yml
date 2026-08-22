@@ -22,9 +22,9 @@ packages:
   Highlightr:
     url: https://github.com/raspu/Highlightr
     from: 2.3.0
-  SwiftMath:
-    url: https://github.com/mgriebling/SwiftMath
-    from: 1.7.3
+  SwaTex:
+    url: https://github.com/PhraseHQ/SwaTex.git
+    from: 0.5.0
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.6.0
@@ -104,8 +104,8 @@ targets:
         product: MarkdownUI
       - package: Highlightr
         product: Highlightr
-      - package: SwiftMath
-        product: SwiftMath
+      - package: SwaTex
+        product: SwaTexRender
       - package: Sparkle
         product: Sparkle
   MLXChatTests:

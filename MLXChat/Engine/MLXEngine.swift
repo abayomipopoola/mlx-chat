@@ -49,19 +49,19 @@ final class MLXEngine: ChatEngine {
         // hub snapshot) loads offline. A `.directory` configuration resolves without the
         // downloader AND keeps extraEOSTokens — the bare `loadContainer(from: URL, …)`
         // overload would drop them and Qwen models would run past <|im_end|>.
-        let configuration: ModelConfiguration
-        if let localDirectory = ModelStore.localMLXModelDirectory(for: model.id) {
-            do {
-                try ModelWeightNormalizer.normalizeIfNeeded(in: localDirectory)
-            } catch {
-                throw EngineError.generationFailed(
-                    "Couldn't prepare the model weights: \(error.localizedDescription)")
-            }
-            configuration = ModelConfiguration(
-                directory: localDirectory, extraEOSTokens: model.extraEOSTokens)
-        } else {
-            configuration = ModelConfiguration(id: model.id, extraEOSTokens: model.extraEOSTokens)
+        let capabilities = ModelCatalog.applyingKnownCapabilities(to: model)
+        guard let localDirectory = ModelStore.localMLXModelDirectory(for: model.id) else {
+            throw EngineError.unavailable(
+                "This model is not downloaded or its files are missing.")
         }
+        do {
+            try ModelWeightNormalizer.normalizeIfNeeded(in: localDirectory)
+        } catch {
+            throw EngineError.generationFailed(
+                "Couldn't prepare the model weights: \(error.localizedDescription)")
+        }
+        let configuration = ModelConfiguration(
+            directory: localDirectory, extraEOSTokens: capabilities.extraEOSTokens)
 
         do {
             // Route mlx C-level errors (e.g. affine quantize rejection) into
@@ -170,7 +170,8 @@ final class MLXEngine: ChatEngine {
                     // the template context, no session rebuild needed.
                     let thinkingEnabled = ThinkingPreference.isEnabled
                     var filter = ThinkTagFilter()
-                    if let thinking = model.thinking {
+                    let thinking = ModelCatalog.applyingKnownCapabilities(to: model).thinking
+                    if let thinking {
                         let active = !thinking.toggleable || thinkingEnabled
                         if thinking.toggleable {
                             session.additionalContext = ["enable_thinking": thinkingEnabled]

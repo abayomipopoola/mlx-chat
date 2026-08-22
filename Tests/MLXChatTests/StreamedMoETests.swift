@@ -43,7 +43,7 @@ import Testing
     }
 
     @Test func ssdOptionIsAvailableForAllPinnedMoESources() {
-        #expect(StreamedMoEInstall.variants.count == 3)
+        #expect(StreamedMoEInstall.variants.count == 4)
         for variant in StreamedMoEInstall.variants {
             #expect(StreamedMoEInstall.supportsSSDStreaming(
                 sourceModelID: variant.sourceRepoID))
@@ -63,9 +63,23 @@ import Testing
             == "Qwen3.6-35B-A3B.gturbo")
         #expect(StreamedMoEInstall.qwen36.architecture == .qwen36)
         #expect(StreamedMoEInstall.qwen36.helperModelArgument == "qwen36")
+        #expect(StreamedMoEInstall.ornith15.managedDirectory.lastPathComponent
+            == "Ornith-1.5-35B-A3B.gturbo")
+        #expect(StreamedMoEInstall.ornith15.architecture == .qwen36)
+        #expect(StreamedMoEInstall.ornith15.helperModelArgument == "ornith15")
         #expect(ModelDownloadMode.defaultMode == .mlx)
         #expect(ModelDownloadMode.availableModes(
             for: "mlx-community/gemma-4-12B-it-4bit") == [.mlx])
+        // Ornith-1.5-9B is a dense Qwen 3.5 checkpoint. SSD streaming is pinned
+        // to Gemma 4 26B-A4B, Qwen3.6 35B-A3B, and Ornith 1.5 35B-A3B.
+        #expect(!StreamedMoEInstall.supportsSSDStreaming(
+            sourceModelID: "ornith-ai/Ornith-1.5-9B-MLX-4bit"))
+        #expect(ModelDownloadMode.availableModes(
+            for: "ornith-ai/Ornith-1.5-9B-MLX-4bit") == [.mlx])
+        #expect(StreamedMoEInstall.supportsSSDStreaming(
+            sourceModelID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit"))
+        #expect(ModelDownloadMode.availableModes(
+            for: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit") == [.mlx, .ssdStreamed])
     }
 
     @Test func streamedRemovalKeepsExternalFoldersButOwnsManagedArtifacts() {
@@ -148,7 +162,7 @@ import Testing
             decoding: output.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self)
         #expect(process.terminationStatus == 0)
-        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36>"))
+        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15>"))
         #expect(text.contains("--dry-run"))
     }
 

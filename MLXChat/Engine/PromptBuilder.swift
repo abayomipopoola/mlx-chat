@@ -3,22 +3,15 @@ import Foundation
 enum PromptBuilder {
     static let basePrompt = """
         You are a helpful assistant running fully on-device on the user's Mac. Nothing the user writes ever leaves this device.
-        Format your responses in Markdown. Use fenced code blocks with a language tag for code. Use $...$ for inline math and $$...$$ for display math whenever you write mathematics.
+        Give only the final answer; keep internal reasoning private. Write the answer as chat text. You may use bold, lists, and short headings in the reply. Do not wrap the whole answer in a markdown, json, xml, or other fence. Use a fenced code block with a language tag only for actual code. Use $...$ for inline math and $$...$$ for display math whenever you write mathematics.
         """
 
     /// Assemble the system prompt. `presetText` (the selected prompt preset, possibly
     /// user-edited) is prepended when non-empty; nil/empty falls back to `basePrompt`
-    /// alone. Custom instructions are appended only when personalization is enabled.
-    static func systemPrompt(
-        presetText: String? = nil,
-        personalizationEnabled: Bool,
-        customInstructions: String
-    ) -> String {
+    /// alone.
+    static func systemPrompt(presetText: String? = nil) -> String {
         let preset = presetText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let core = preset.isEmpty ? basePrompt : preset + "\n\n" + basePrompt
-        let instructions = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard personalizationEnabled, !instructions.isEmpty else { return core }
-        return core + "\n\n# User's custom instructions\n" + String(instructions.prefix(1000))
+        return preset.isEmpty ? basePrompt : preset + "\n\n" + basePrompt
     }
 
     /// Compose the user-turn text sent to the engine. When a file attachment is
@@ -32,7 +25,7 @@ enum PromptBuilder {
     /// context window, dropping oldest user/assistant pairs. The final (pending) message
     /// is never dropped, even if it alone exceeds the budget.
     static func trimmed(history: [EngineMessage], ctxTokens: Int) -> [EngineMessage] {
-        let budget = Int(Double(min(ctxTokens, 32_768)) * 0.7)
+        let budget = Int(Double(min(ctxTokens, 131_072)) * 0.7)
         func tokens(_ message: EngineMessage) -> Int { (message.text.count + 3) / 4 }
 
         var total = history.reduce(0) { $0 + tokens($1) }

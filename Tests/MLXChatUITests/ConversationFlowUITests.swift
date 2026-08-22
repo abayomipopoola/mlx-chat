@@ -29,27 +29,30 @@ final class ConversationFlowUITests: MLXUITestCase {
                       "new chat should land on the welcome state")
     }
 
-    /// ⌃N clears the selection to the welcome state without creating a
+    /// ⌘N clears the selection to the welcome state without creating a
     /// conversation (ChatScreen creates one lazily on first send). Pressing
     /// again must stay on welcome and leave the sidebar list unchanged.
-    /// The File-menu New Chat command keeps ⌃N alive even with the composer
-    /// focused (menu key equivalents beat the TextField's emacs Ctrl+N binding).
-    /// Click the sidebar list first so focus is deterministic for the synthetic key.
-    func testCtrlNOpensNewChatAndStaysIdempotent() {
+    /// File > New Chat replaces WindowGroup's New Window so ⌘N does not
+    /// spawn a second window. Click the sidebar list first so focus is
+    /// deterministic for the synthetic key.
+    func testCmdNOpensNewChatAndStaysIdempotent() {
         XCTAssertTrue(conversationList.waitForExistence(timeout: 3))
         conversationList.click()
 
         let countBefore = conversationList.buttons.count
+        let windowCountBefore = app.windows.count
 
-        app.typeKey("n", modifierFlags: .control)
+        app.typeKey("n", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 3),
-                      "⌃N should land on the welcome state")
+                      "⌘N should land on the welcome state")
+        XCTAssertEqual(app.windows.count, windowCountBefore,
+                       "⌘N must not open a new window")
 
-        app.typeKey("n", modifierFlags: .control)
+        app.typeKey("n", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 3),
-                      "second ⌃N should stay on welcome (idempotent)")
+                      "second ⌘N should stay on welcome (idempotent)")
         XCTAssertEqual(conversationList.buttons.count, countBefore,
-                       "⌃N must not create sidebar conversations")
+                       "⌘N must not create sidebar conversations")
     }
 
     /// The one test that creates data: a throwaway "ping" conversation in the

@@ -101,6 +101,8 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     /// Reasoning can be switched off per turn via the model's `enable_thinking`
     /// template kwarg (Qwen3 family, Ternary Bonsai, Gemma 4). R1 distills
     /// reason unconditionally.
+    var supportsThinking: Bool { thinking != nil }
+
     var supportsThinkingToggle: Bool { thinking?.toggleable == true }
 
     /// TurboFieldfare's FP16 KV cache uses the SSD runtime setting (4K–32K).
@@ -185,6 +187,10 @@ enum ModelCatalog {
             blurb: "A compact Qwen generation with strong all-round quality, thinking mode, and 256K context.",
             badges: [.new, .thinking, .recommended]),
         ModelFamily(
+            id: "ornith", name: "Ornith", icon: "bird",
+            blurb: "Ornith 1.5 Qwen 3.5 family models with thinking mode and 256K context. The 35B-A3B MoE can use standard MLX or SSD streaming.",
+            badges: [.new, .thinking]),
+        ModelFamily(
             id: "gemma4", name: "Gemma 4", icon: "bubble.left.and.bubble.right",
             blurb: "The latest generation of open models from Google. Optimized for multi-turn chat and advanced reasoning, with 256K context.",
             badges: [.new, .recommended, .vision]),
@@ -233,6 +239,7 @@ enum ModelCatalog {
         if name.hasPrefix("LFM2.5") { return "lfm25" }
         if name.hasPrefix("Qwen3.6") { return "qwen36" }
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
+        if name.hasPrefix("Ornith") { return "ornith" }
         if name.hasPrefix("Qwen3") { return "qwen3" }
         if name.hasPrefix("Qwen2.5 VL") { return "qwen25vl" }
         if name.hasPrefix("Qwen2.5 Coder") { return "coder" }
@@ -337,6 +344,25 @@ enum ModelCatalog {
             blurb: "Small, fast Qwen3.5 for quick tasks.",
             extraEOSTokens: ["<|im_end|>"], thinking: .thinkTags(startsInside: true, toggleable: true)),
         CatalogModel(
+            id: "ornith-ai/Ornith-1.5-9B-MLX-4bit", displayName: "Ornith 1.5 9B",
+            sizeGB: 5.06, ctxTokens: 262_144, quantLabel: "4-bit", category: .general,
+            blurb: "Dense Ornith 1.5. Qwen 3.5 reasoning with 256K context.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true)),
+        CatalogModel(
+            id: StreamedMoEInstall.ornith15.sourceRepoID, displayName: "Ornith 1.5 35B A3B",
+            sizeGB: 19.5, ctxTokens: 262_144, quantLabel: "4-bit MoE", category: .general,
+            blurb: "Mixture-of-experts Ornith 1.5 with about 3B active parameters. Use standard MLX or a separate low-memory SSD-streamed install.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true)),
+        CatalogModel(
+            id: StreamedMoEInstall.ornith15.modelID, displayName: "Ornith 1.5 35B A3B",
+            sizeGB: 19.5, ctxTokens: 262_144, quantLabel: "4-bit · SSD", category: .general,
+            blurb: "Text-only Ornith MoE with a configurable context cache and SSD-streamed experts.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            backend: .streamedMoE),
+        CatalogModel(
             id: "mlx-community/Qwen3-4B-4bit", displayName: "Qwen3 4B",
             sizeGB: 2.26, ctxTokens: 40_960, quantLabel: "4-bit", category: .general,
             blurb: "Solid general model with thinking mode.",
@@ -422,33 +448,91 @@ enum ModelCatalog {
 
     /// Fallback entry shape for user-imported repos. Known imported models are
     /// enriched with capabilities that cannot be inferred from the repo id alone.
-    static func importedModel(repoID: String, supportsVision: Bool = false) -> CatalogModel {
-        applyingKnownCapabilities(to: CatalogModel(
-            id: repoID,
-            displayName: repoID.split(separator: "/").last.map(String.init) ?? repoID,
-            sizeGB: 0, ctxTokens: 8_192, quantLabel: "MLX", category: .imported,
-            blurb: "Imported from HuggingFace.",
-            extraEOSTokens: [], thinking: nil,
-            supportsVision: supportsVision))
+    static func importedModel(repoID: String, supportsVision: Bool = false, configJSON: Data? = nil) -> CatalogModel {
+        applyingKnownCapabilities(
+            to: CatalogModel(
+                id: repoID,
+                displayName: repoID.split(separator: "/").last.map(String.init) ?? repoID,
+                sizeGB: 0, ctxTokens: 8_192, quantLabel: "MLX", category: .imported,
+                blurb: "Imported from HuggingFace.",
+                extraEOSTokens: [], thinking: nil,
+                supportsVision: supportsVision),
+            configJSON: configJSON)
     }
 
     /// Upgrades persisted imported entries when support for one of their model
     /// families is added after the model was originally imported.
-    static func applyingKnownCapabilities(to model: CatalogModel) -> CatalogModel {
-        guard model.id.lowercased() == "prism-ml/ternary-bonsai-27b-mlx-2bit" else {
+    static func applyingKnownCapabilities(to model: CatalogModel, configJSON: Data? = nil) -> CatalogModel {
+        let id = model.id.lowercased()
+        let contextTokens: Int
+        let extraEOSTokens: Set<String>
+        let thinking: ThinkingConfig
+
+        if id == "prism-ml/ternary-bonsai-27b-mlx-2bit" {
+            contextTokens = 262_144
+            extraEOSTokens = ["<|im_end|>"]
+            thinking = .thinkTags(startsInside: true, toggleable: true)
+        } else if isOrnithQwenFamily(id) {
+            // Ornith 1.0/1.5 are Qwen 3.5 reasoning models (dense 9B and MoE
+            // 35B/397B). The chat template pre-opens <think>, so only </think>
+            // appears in the decoded stream before the visible answer. The
+            // dense 9B checkpoint is not a streamed-MoE source.
+            contextTokens = 262_144
+            extraEOSTokens = ["<|im_end|>", "<|endoftext|>"]
+            thinking = .thinkTags(startsInside: true, toggleable: true)
+        } else if let type = modelType(from: configJSON),
+                  let inferred = thinkingConfig(forModelType: type) {
+            let usesLongContext = type.hasPrefix("qwen3_5") || type.hasPrefix("gemma4")
+            contextTokens = usesLongContext ? max(model.ctxTokens, 262_144) : model.ctxTokens
+            extraEOSTokens = ["<|im_end|>"]
+            thinking = inferred
+        } else {
             return model
         }
+
         return CatalogModel(
             id: model.id,
             displayName: model.displayName,
             sizeGB: model.sizeGB,
-            ctxTokens: 262_144,
+            ctxTokens: contextTokens,
             quantLabel: model.quantLabel,
             category: model.category,
             blurb: model.blurb,
-            extraEOSTokens: model.extraEOSTokens.union(["<|im_end|>"]),
-            thinking: .thinkTags(startsInside: true, toggleable: true),
+            extraEOSTokens: model.extraEOSTokens.union(extraEOSTokens),
+            thinking: thinking,
             supportsVision: model.supportsVision,
-            backend: model.backend)
+            backend: model.backend,
+            sourceSubfolder: model.sourceSubfolder,
+            sourceRepoID: model.sourceRepoID,
+            installRestriction: model.installRestriction)
+    }
+
+    /// Ornith 1.0 and 1.5 Hugging Face ids, regardless of owner or quant label.
+    static func isOrnithQwenFamily(_ id: String) -> Bool {
+        let lower = id.lowercased()
+        return lower.contains("/ornith-1.0") || lower.contains("/ornith-1.5")
+    }
+
+    static func thinkingConfig(forModelType type: String) -> ThinkingConfig? {
+        switch type {
+        case "qwen3_5", "qwen3_5_moe", "qwen3_5_text":
+            return .thinkTags(startsInside: true, toggleable: true)
+        case "qwen3", "qwen3_moe":
+            return .thinkTags(toggleable: true)
+        case "gemma4", "gemma4_text", "gemma4_unified":
+            return .gemmaChannel
+        default:
+            return nil
+        }
+    }
+
+    private static func modelType(from configJSON: Data?) -> String? {
+        guard let configJSON,
+              let object = try? JSONSerialization.jsonObject(with: configJSON),
+              let dict = object as? [String: Any],
+              let type = dict["model_type"] as? String
+        else { return nil }
+        let trimmed = type.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

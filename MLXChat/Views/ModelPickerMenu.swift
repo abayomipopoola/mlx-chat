@@ -9,14 +9,7 @@ struct ModelPickerMenu: View {
     @Environment(HeaderDropdown.self) private var dropdown
 
     /// True while the currently selected model is being pulled into RAM.
-    private var isLoadingSelected: Bool {
-        switch chat.runtime.state {
-        case .loading(let id, _), .downloading(let id):
-            return id == chat.selectedModelID
-        default:
-            return false
-        }
-    }
+    private var isLoadingSelected: Bool { chat.isSelectedModelPreparing }
 
     var body: some View {
         Button {
@@ -25,6 +18,8 @@ struct ModelPickerMenu: View {
             capsuleLabel
         }
         .buttonStyle(.plain)
+        .disabled(chat.isStreaming)
+        .help(chat.isStreaming ? "Stop the current response before switching models" : "Select model")
         .accessibilityIdentifier("modelPickerButton")
         .dropdownAnchor(.modelPicker, in: dropdown)
         .onAppear {
@@ -38,23 +33,24 @@ struct ModelPickerMenu: View {
     // MARK: - Capsule
 
     private var capsuleLabel: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             if isLoadingSelected {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.7)
             }
             Text(chat.selectedModelDisplayName)
-                .font(.system(size: 13, weight: .semibold))
+                .font(Studio.sans(13, weight: .semibold))
             Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }
+        .offset(y: -2)
+        .padding(.horizontal, 12)
+        .frame(height: Studio.headerChipHeight)
         .opacity(isLoadingSelected ? 0.5 : 1)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .studioQuietFill(in: Capsule())
         .contentShape(Capsule())
         .animation(.easeOut(duration: 0.2), value: isLoadingSelected)
     }
@@ -80,7 +76,7 @@ struct ModelPickerPanel: View {
             // Top title ("Select model"), in the same 11pt style as the
             // "Models" section header below.
             Text("Select model")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Studio.sans(11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 20)
                 .padding(.bottom, 2)
@@ -101,7 +97,7 @@ struct ModelPickerPanel: View {
                 // exact size of the old AppKit menu's "Model"/"Chat" labels,
                 // measured from the 1.0.2 menu), aligned with the row text.
                 Text("Models")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Studio.sans(11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.leading, 20)
                     .padding(.top, 4)
@@ -116,7 +112,7 @@ struct ModelPickerPanel: View {
             if let message = AppleIntelligenceEngine.availabilityMessage() {
                 Divider()
                 Text("Apple Intelligence — \(message)")
-                    .font(.caption)
+                    .font(Studio.sans(10))
                     .foregroundStyle(.secondary)
             }
 
@@ -127,7 +123,7 @@ struct ModelPickerPanel: View {
                 onManageModels()
             } label: {
                 Label("Download Models…", systemImage: "arrow.down.circle")
-                    .font(.system(size: 13))
+                    .font(Studio.sans(13))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
@@ -149,16 +145,17 @@ struct ModelPickerPanel: View {
                 .frame(width: 14)
 
             Button {
-                chat.selectedModelID = id
+                chat.selectModel(id)
                 dropdown.open = nil
             } label: {
                 Text(name)
-                    .font(.system(size: 13))
+                    .font(Studio.sans(13))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(chat.isStreaming)
             .accessibilityIdentifier("modelRow.\(id)")
 
             if resident {
@@ -184,7 +181,7 @@ struct ModelPickerPanel: View {
     /// unloadCurrent is the idempotent guarantee.)
     private func eject() {
         guard !chat.isStreaming else { return }
-        chat.selectedModelID = appleIntelligenceEngineID
+        chat.selectModel(appleIntelligenceEngineID)
         chat.runtime.unloadCurrent()
         dropdown.open = nil
     }

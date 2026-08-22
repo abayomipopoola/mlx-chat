@@ -24,7 +24,7 @@ struct ImportModelSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             Text("Import Custom Model")
-                .font(.headline)
+                .font(Studio.sans(13, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
 
@@ -41,7 +41,7 @@ struct ImportModelSheet: View {
 
                     VStack(spacing: 4) {
                         Text("Import from HuggingFace")
-                            .font(.system(size: 20, weight: .bold))
+                            .font(Studio.sans(20, weight: .bold))
                         Text("Download MLX-compatible models directly from HuggingFace")
                             .font(Studio.body13)
                             .foregroundStyle(Color.subtitleGray)
@@ -119,7 +119,7 @@ private struct RepoInputCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Model ID or URL")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Studio.sans(13, weight: .semibold))
             TextField("ModelAuthor/ModelName-MLX", text: $input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13).monospaced())
@@ -132,11 +132,11 @@ private struct RepoInputCard: View {
                 .onSubmit(onSubmit)
                 .accessibilityIdentifier("importRepoField")
             Text("Example: LiquidAI/LFM2.5-2.6B-MLX or a full Hugging Face URL")
-                .font(.caption)
+                .font(Studio.sans(10))
                 .foregroundStyle(.secondary)
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.caption)
+                    .font(Studio.sans(10))
                     .foregroundStyle(.red)
             }
         }
@@ -151,7 +151,7 @@ private struct ImportRiskCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("At Your Own Risk", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 14, weight: .bold))
+                .font(Studio.sans(14, weight: .bold))
                 .foregroundStyle(Color.iconOrange)
             VStack(alignment: .leading, spacing: 4) {
                 bullet("Model compatibility is not guaranteed")
@@ -159,11 +159,11 @@ private struct ImportRiskCard: View {
                 bullet("Could crash or perform poorly on your device")
             }
             Text("Only import models from trusted sources. Official authors and **mlx-community** both publish compatible MLX checkpoints.")
-                .font(.caption)
+                .font(Studio.sans(10))
                 .foregroundStyle(.secondary)
             Link(destination: URL(string: "https://huggingface.co/models?library=mlx")!) {
                 Label("Browse MLX Models on Hugging Face", systemImage: "globe")
-                    .font(.caption.weight(.semibold))
+                    .font(Studio.sans(10, weight: .semibold))
             }
             .foregroundStyle(Color.brandGreen)
         }

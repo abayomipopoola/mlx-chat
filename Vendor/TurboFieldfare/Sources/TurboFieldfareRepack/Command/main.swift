@@ -3,8 +3,8 @@ import TurboFieldfareRepackCore
 
 private let usage = """
 Usage:
-  TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36>] --output <model.gturbo> [--overwrite] [--resume]
-  TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36>] --dry-run --output <model.gturbo>
+  TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15>] --output <model.gturbo> [--overwrite] [--resume]
+  TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15>] --dry-run --output <model.gturbo>
   TurboFieldfareRepack --discard-partial --output <model.gturbo>
   TurboFieldfareRepack --verify-install --input-gturbo <model.gturbo>
   TurboFieldfareRepack --help

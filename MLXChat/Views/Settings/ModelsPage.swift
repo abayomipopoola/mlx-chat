@@ -14,15 +14,14 @@ private enum ModelsSheetDestination: Identifiable {
 
 struct ModelsPage: View {
     @Environment(ChatController.self) private var chat
-    /// Pops back (custom routing, no NavigationStack).
-    var onBack: () -> Void = {}
+    /// Family drill-down is an AppRoute; nil shows the overview.
+    var familyID: String? = nil
+    var onOpenFamily: (String) -> Void = { _ in }
 
     @State private var searchText = ""
     @State private var presentedSheet: ModelsSheetDestination?
     @State private var deleteCandidate: CatalogModel?
     @State private var removalError: String?
-    /// Non-nil while a family's model list is open (in-page drill-down).
-    @State private var openFamilyID: String?
 
     private var isSearching: Bool {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -38,7 +37,7 @@ struct ModelsPage: View {
     }
 
     private var openFamily: ModelFamily? {
-        openFamilyID.flatMap { ModelCatalog.family(for: $0) }
+        familyID.flatMap { ModelCatalog.family(for: $0) }
     }
 
     private func members(of familyID: String) -> [CatalogModel] {
@@ -56,14 +55,12 @@ struct ModelsPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StudioPageHeader(
-                title: openFamily?.name ?? "Manage Models",
-                onBack: openFamilyID != nil ? { openFamilyID = nil } : onBack)
+            StudioPageHeader(title: openFamily?.name ?? "Manage Models")
 
-            if openFamilyID == nil {
+            if familyID == nil {
                 StudioSearchField(
                     placeholder: "Search models", text: $searchText,
-                    verticalPadding: 10, horizontalPadding: 14, ringColor: .brandGreen,
+                    verticalPadding: 10, horizontalPadding: 14,
                     ringOnFocusOnly: true)
                     .frame(maxWidth: Studio.contentMaxWidth)
                     .padding(.horizontal, 16)
@@ -183,7 +180,7 @@ struct ModelsPage: View {
                         initialMode: .mlx)
                 },
                 onDelete: { deleteCandidate = $0 },
-                onOpenFamily: { openFamilyID = $0 })
+                onOpenFamily: onOpenFamily)
         }
     }
 
@@ -331,7 +328,7 @@ private struct ModelsOverview: View {
 
         Link(destination: URL(string: "https://huggingface.co/models?library=mlx")!) {
             Label("Browse MLX models on Hugging Face", systemImage: "globe")
-                .font(.callout)
+                .font(Studio.sans(12))
         }
         .foregroundStyle(Color.brandGreen)
         .padding(.vertical, 10)

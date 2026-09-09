@@ -227,7 +227,7 @@ struct ChatScreen: View {
             text,
             in: target,
             image: attachments.imageData,
-            attachment: attachments.attachment)
+            attachments: attachments.files)
     }
 
     private func regenerateAction(

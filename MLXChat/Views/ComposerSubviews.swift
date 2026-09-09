@@ -5,12 +5,16 @@ import SwiftUI
 
 struct PendingAttachmentStrip: View {
     let pendingImagePreview: NSImage?
-    let pendingFileName: String?
+    /// One chip per pending file, in attach order.
+    let pendingFiles: [(name: String, text: String)]
     let onClearImage: () -> Void
-    let onClearFile: () -> Void
+    /// Called with the name of the chip that was cleared.
+    let onClearFile: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        // Wraps onto additional lines once several files are attached, rather
+        // than letting the strip scroll off the edge of the composer.
+        FlowLayout(spacing: 8) {
             if let preview = pendingImagePreview {
                 ZStack(alignment: .topTrailing) {
                     Image(nsImage: preview)
@@ -23,16 +27,16 @@ struct PendingAttachmentStrip: View {
                 }
             }
 
-            if let name = pendingFileName {
+            ForEach(pendingFiles, id: \.name) { file in
                 HStack(spacing: 6) {
                     Image(systemName: "doc.fill")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.iconBlue)
-                    Text(name)
+                    Text(file.name)
                         .font(Studio.sans(12.5))
                         .lineLimit(1)
                         .foregroundStyle(.primary)
-                    clearChipButton { onClearFile() }
+                    clearChipButton { onClearFile(file.name) }
                 }
                 .padding(.leading, 10)
                 .padding(.trailing, 6)
@@ -40,8 +44,6 @@ struct PendingAttachmentStrip: View {
                 .studioQuietFill(in: Capsule())
                 .accessibilityIdentifier("composerAttachmentChip")
             }
-
-            Spacer(minLength: 0)
         }
     }
 
@@ -53,6 +55,48 @@ struct PendingAttachmentStrip: View {
                 .foregroundStyle(.white, Color.secondary.opacity(0.85))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Minimal left-to-right wrapping layout for a row of chips that may overflow
+/// onto more than one line (SwiftUI has no built-in flow layout pre-macOS 26 HIG
+/// components; this keeps the strip simple and dependency-free).
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var origin = CGPoint.zero
+        var lineHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if origin.x + size.width > maxWidth, origin.x > 0 {
+                origin.x = 0
+                origin.y += lineHeight + spacing
+                lineHeight = 0
+            }
+            origin.x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+            totalHeight = origin.y + lineHeight
+        }
+        return CGSize(width: maxWidth.isFinite ? maxWidth : origin.x, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var origin = CGPoint(x: bounds.minX, y: bounds.minY)
+        var lineHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if origin.x + size.width > bounds.maxX, origin.x > bounds.minX {
+                origin.x = bounds.minX
+                origin.y += lineHeight + spacing
+                lineHeight = 0
+            }
+            subview.place(at: origin, proposal: ProposedViewSize(size))
+            origin.x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
     }
 }
 

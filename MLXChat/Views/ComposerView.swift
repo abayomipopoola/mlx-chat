@@ -4,9 +4,9 @@ import SwiftUI
 /// Payload handed from the composer to ChatScreen on send.
 struct ComposerAttachments {
     var imageData: Data? = nil
-    var attachment: (name: String, text: String)? = nil
+    var files: [(name: String, text: String)] = []
 
-    var isEmpty: Bool { imageData == nil && attachment == nil }
+    var isEmpty: Bool { imageData == nil && files.isEmpty }
 }
 
 /// Bottom input area: engine status rows, error banner, growing text field, send/stop.
@@ -19,12 +19,31 @@ struct ComposerView: View {
 
     @State private var pendingImageData: Data?
     @State private var pendingImagePreview: NSImage?
-    @State private var pendingFileName: String?
-    @State private var pendingFileText: String?
+    @State private var pendingFiles: [(name: String, text: String)] = []
     @State private var attachHovered = false
 
     private var hasPendingAttachment: Bool {
-        pendingImageData != nil || pendingFileName != nil
+        pendingImageData != nil || !pendingFiles.isEmpty
+    }
+
+    /// Estimated combined size of the draft plus every pending file, checked
+    /// against the selected model's usable context window. When this is true,
+    /// sending now would either get silently truncated or fail once it reaches
+    /// the model, so the composer blocks the send and surfaces a warning instead.
+    private var attachmentsExceedContext: Bool {
+        PromptBuilder.attachmentsExceedBudget(
+            draft: draft,
+            attachments: pendingFiles,
+            ctxTokens: chat.selectedModelContextTokens)
+    }
+
+    private var contextWarning: String? {
+        guard !pendingFiles.isEmpty, attachmentsExceedContext else { return nil }
+        let budget = PromptBuilder.budget(ctxTokens: chat.selectedModelContextTokens)
+        let estimated = PromptBuilder.estimatedPendingTurnTokens(draft: draft, attachments: pendingFiles)
+        return "These attachments are too large for \(chat.selectedModelDisplayName) "
+            + "(~\(estimated.formatted()) tokens vs. a ~\(budget.formatted()) token budget). "
+            + "Remove a file, or pick a model with a bigger context window."
     }
 
     /// Non-allocating draft check (no intermediate trimmed String).
@@ -38,19 +57,20 @@ struct ComposerView: View {
         (draftHasContent || hasPendingAttachment)
             && !chat.isStreaming
             && !isPreparing
+            && !attachmentsExceedContext
     }
 
     private var sendHelp: String {
         if isPreparing { return "Wait until the model finishes loading" }
         if chat.isStreaming { return "Stop generating" }
+        if attachmentsExceedContext { return "Attachments are too large for this model's context window" }
         return "Send"
     }
 
-    /// Photo and file attach both need a vision model.
-    private var showsAttachMenu: Bool {
-        ProcessInfo.processInfo.arguments.contains("--fake-vision-support")
-            || chat.selectedModelSupportsVision
-    }
+    /// File attach works with any model — it's plain text appended to the
+    /// prompt. Photo attach still needs a vision-capable model, gated
+    /// separately inside `AttachPanel`.
+    private var showsAttachMenu: Bool { true }
 
     var body: some View {
         // Evaluate once per body pass (send button reads this three times).
@@ -61,13 +81,19 @@ struct ComposerView: View {
         VStack(spacing: 8) {
             ComposerStatusRows()
 
+            if let warning = contextWarning {
+                ContextWarningBanner(message: warning)
+                    .frame(maxWidth: 720)
+                    .frame(maxWidth: .infinity)
+            }
+
             VStack(alignment: .leading, spacing: 0) {
                 if hasPendingAttachment {
                     PendingAttachmentStrip(
                         pendingImagePreview: pendingImagePreview,
-                        pendingFileName: pendingFileName,
+                        pendingFiles: pendingFiles,
                         onClearImage: clearPendingImage,
-                        onClearFile: clearPendingFile)
+                        onClearFile: { name in clearPendingFile(named: name) })
                         .padding(.horizontal, 14)
                         .padding(.top, 8)
                 }
@@ -124,8 +150,7 @@ struct ComposerView: View {
             dropdown.attachFile = { pickFile() }
             // UI-verification hook: seed a pending file chip without NSOpenPanel.
             if ProcessInfo.processInfo.arguments.contains("--seed-attachment") {
-                pendingFileName = "notes.txt"
-                pendingFileText = "hello"
+                pendingFiles = [(name: "notes.txt", text: "hello")]
             }
             // UI-verification hook: force ErrorBannerRow to render.
             if ProcessInfo.processInfo.arguments.contains("--seed-error-banner") {
@@ -211,9 +236,14 @@ struct ComposerView: View {
             return
         case .failed(let message):
             chat.errorBanner = message
-        case .picked(let name, let text):
-            pendingFileName = name
-            pendingFileText = text
+        case .picked(let files, let failures):
+            pendingFiles.append(contentsOf: files)
+            if !failures.isEmpty {
+                let names = failures.map(\.name).joined(separator: ", ")
+                chat.errorBanner = failures.count == 1
+                    ? "Couldn't read \(names): \(failures[0].reason)"
+                    : "Couldn't read \(failures.count) files: \(names)"
+            }
         }
     }
 
@@ -223,17 +253,14 @@ struct ComposerView: View {
         draft = ""
         let attachments = ComposerAttachments(
             imageData: pendingImageData,
-            attachment: pendingFileName.flatMap { name in
-                guard let body = pendingFileText else { return nil }
-                return (name: name, text: body)
-            })
+            files: pendingFiles)
         clearPending()
         onSend(text, attachments)
     }
 
     private func clearPending() {
         clearPendingImage()
-        clearPendingFile()
+        pendingFiles.removeAll()
     }
 
     private func clearPendingImage() {
@@ -241,15 +268,48 @@ struct ComposerView: View {
         pendingImagePreview = nil
     }
 
-    private func clearPendingFile() {
-        pendingFileName = nil
-        pendingFileText = nil
+    /// Removes one pending file by name (chips clear individually).
+    private func clearPendingFile(named name: String) {
+        pendingFiles.removeAll { $0.name == name }
+    }
+}
+
+/// Non-blocking banner shown above the composer when pending attachments won't
+/// fit the selected model's context window. Send stays disabled while this shows.
+private struct ContextWarningBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(Studio.sans(12))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.12)))
+        .padding(.horizontal, 32)
+        .accessibilityIdentifier("composerContextWarningBanner")
     }
 }
 
 /// In-window attach popup: title plus icon rows, matching the header dropdowns.
 struct AttachPanel: View {
     @Environment(HeaderDropdown.self) private var dropdown
+    @Environment(ChatController.self) private var chat
+
+    /// Photo attach needs a vision-capable model; file attach (plain text
+    /// appended to the prompt) works with any model, so it's never gated.
+    private var showsPhotoRow: Bool {
+        ProcessInfo.processInfo.arguments.contains("--fake-vision-support")
+            || chat.selectedModelSupportsVision
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -259,11 +319,13 @@ struct AttachPanel: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 4)
 
-            attachRow(title: "Photo or Image…", systemImage: "photo") {
-                dropdown.open = nil
-                dropdown.attachPhoto?()
+            if showsPhotoRow {
+                attachRow(title: "Photo or Image…", systemImage: "photo") {
+                    dropdown.open = nil
+                    dropdown.attachPhoto?()
+                }
             }
-            attachRow(title: "File…", systemImage: "doc") {
+            attachRow(title: "Files…", systemImage: "doc") {
                 dropdown.open = nil
                 dropdown.attachFile?()
             }

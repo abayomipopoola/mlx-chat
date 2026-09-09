@@ -96,15 +96,15 @@ final class AttachmentFlowUITests: MLXUITestCase {
         attach.click()
 
         // Menu items can appear as menuItems or buttons depending on presentation.
-        let menuFile = app.menuItems["File…"]
-        let buttonFile = app.buttons["File…"]
+        let menuFile = app.menuItems["Files…"]
+        let buttonFile = app.buttons["Files…"]
         let fileItem: XCUIElement
         if menuFile.waitForExistence(timeout: 3) {
             fileItem = menuFile
         } else if buttonFile.waitForExistence(timeout: 2) {
             fileItem = buttonFile
         } else {
-            XCTFail("File… menu item should appear")
+            XCTFail("Files… menu item should appear")
             return
         }
         fileItem.click()

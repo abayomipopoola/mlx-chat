@@ -12,8 +12,12 @@ enum AttachmentPicker {
 
     enum FileResult {
         case cancelled
+        /// Every selected file failed to read (e.g. a single unsupported file).
         case failed(String)
-        case picked(name: String, text: String)
+        /// `files` succeeded; `failures` lists any selected files that didn't
+        /// (per-file name + reason), so a partial success still surfaces what
+        /// went wrong instead of failing the whole pick silently.
+        case picked(files: [(name: String, text: String)], failures: [(name: String, reason: String)])
     }
 
     /// Content types accepted by the file attachment panel.
@@ -46,21 +50,33 @@ enum AttachmentPicker {
         return .picked(data: data, preview: preview)
     }
 
-    /// Presents a file open panel and extracts text. Returns `.cancelled` if dismissed.
+    /// Presents a file open panel allowing multiple selections and extracts text
+    /// from each. Returns `.cancelled` if dismissed without picking anything.
+    /// Files that fail to extract don't block the ones that succeed — they're
+    /// reported back in `failures` instead.
     static func pickFile() -> FileResult {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowedContentTypes = fileContentTypes
-        panel.message = "Choose a PDF or text file"
-        guard panel.runModal() == .OK, let url = panel.url else { return .cancelled }
+        panel.message = "Choose PDF or text files"
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return .cancelled }
 
-        do {
-            let text = try FileTextExtractor.extract(url: url)
-            return .picked(name: url.lastPathComponent, text: text)
-        } catch {
-            return .failed(error.localizedDescription)
+        var files: [(name: String, text: String)] = []
+        var failures: [(name: String, reason: String)] = []
+        for url in panel.urls {
+            do {
+                let text = try FileTextExtractor.extract(url: url)
+                files.append((name: url.lastPathComponent, text: text))
+            } catch {
+                failures.append((name: url.lastPathComponent, reason: error.localizedDescription))
+            }
         }
+
+        if files.isEmpty, let first = failures.first {
+            return .failed(first.reason)
+        }
+        return .picked(files: files, failures: failures)
     }
 }

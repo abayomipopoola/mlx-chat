@@ -101,6 +101,52 @@ import Testing
         #expect(result == "Please summarize\n\n[File: notes.md]\nline one\nline two")
     }
 
+    @Test func multipleAttachmentsComposeOneBlockEach() {
+        let result = PromptBuilder.userText(
+            content: "Compare these",
+            attachments: [
+                (name: "a.txt", text: "alpha"),
+                (name: "b.txt", text: "beta"),
+            ])
+        #expect(result == "Compare these\n\n[File: a.txt]\nalpha\n\n[File: b.txt]\nbeta")
+    }
+
+    @Test func noAttachmentsLeavesContentUnchanged() {
+        #expect(PromptBuilder.userText(content: "Hello", attachments: []) == "Hello")
+    }
+
+    // MARK: - PromptBuilder.attachmentsExceedBudget
+
+    @Test func smallAttachmentsFitBudget() {
+        let exceeds = PromptBuilder.attachmentsExceedBudget(
+            draft: "Summarize this",
+            attachments: [(name: "short.txt", text: "just a few words")],
+            ctxTokens: 32_768)
+        #expect(!exceeds)
+    }
+
+    @Test func oversizedAttachmentExceedsBudget() {
+        // ~4 chars/token estimate; budget for a 4096-token model is ~2867 tokens
+        // (~11,468 chars). A single file well past that should trip the check
+        // even though PromptBuilder.trimmed() would never drop this pending turn.
+        let hugeText = String(repeating: "a", count: 50_000)
+        let exceeds = PromptBuilder.attachmentsExceedBudget(
+            draft: "",
+            attachments: [(name: "huge.txt", text: hugeText)],
+            ctxTokens: 4_096)
+        #expect(exceeds)
+    }
+
+    @Test func multipleSmallAttachmentsCanCombineToExceedBudget() {
+        let chunk = String(repeating: "a", count: 4_000)  // ~1000 tokens each
+        let attachments = (0..<5).map { (name: "file\($0).txt", text: chunk) }  // ~5000 tokens
+        let exceeds = PromptBuilder.attachmentsExceedBudget(
+            draft: "",
+            attachments: attachments,
+            ctxTokens: 4_096)  // budget ~2867 tokens
+        #expect(exceeds)
+    }
+
     // MARK: - Helpers
 
     private func writeOnePagePDF(text: String, to url: URL) throws {

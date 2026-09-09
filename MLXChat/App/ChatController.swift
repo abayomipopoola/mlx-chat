@@ -112,6 +112,16 @@ final class ChatController {
         modelStore.model(for: selectedModelID)?.supportsVision == true
     }
 
+    /// Usable context window for the selected model, in tokens — the same figure
+    /// each engine trims history against. The composer uses this to warn before a
+    /// send, rather than the model silently truncating or failing on it.
+    var selectedModelContextTokens: Int {
+        if selectedModelID == appleIntelligenceEngineID {
+            return AppleIntelligenceEngine.contextTokens
+        }
+        return modelStore.model(for: selectedModelID)?.runtimeContextTokens ?? 4096
+    }
+
     /// True while the selected local model is downloading or loading into RAM.
     /// The composer stays inert until that finishes so a send cannot race load.
     var isSelectedModelPreparing: Bool {
@@ -126,11 +136,11 @@ final class ChatController {
         _ text: String,
         in conversation: Conversation,
         image: Data? = nil,
-        attachment: (name: String, text: String)? = nil
+        attachments: [(name: String, text: String)] = []
     ) {
         guard !isStreaming, !isSelectedModelPreparing, let store = conversationStore else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || image != nil || attachment != nil else { return }
+        guard !trimmed.isEmpty || image != nil || !attachments.isEmpty else { return }
         errorBanner = nil
         retryConversation = nil
         store.appendMessage(
@@ -138,8 +148,7 @@ final class ChatController {
             content: trimmed,
             to: conversation,
             imageData: image,
-            attachmentName: attachment?.name,
-            attachmentText: attachment?.text)
+            attachments: attachments)
 
 #if DEBUG
         // The release-demo recorder still exercises the real composer and
@@ -293,8 +302,7 @@ final class ChatController {
             if message.isUser {
                 let text = PromptBuilder.userText(
                     content: message.content,
-                    attachmentName: message.attachmentName,
-                    attachmentText: message.attachmentText)
+                    attachments: message.attachments)
                 // Images only on the final pending user turn, and only for VLMs.
                 let images: [Data]
                 if supportsVision,

@@ -14,19 +14,38 @@ enum PromptBuilder {
         return preset.isEmpty ? basePrompt : preset + "\n\n" + basePrompt
     }
 
-    /// Compose the user-turn text sent to the engine. When a file attachment is
-    /// present, appends a `[File: name]` block with the extracted body.
-    static func userText(content: String, attachmentName: String?, attachmentText: String?) -> String {
-        guard let name = attachmentName, let text = attachmentText else { return content }
-        return content + "\n\n[File: \(name)]\n\(text)"
+    /// Compose the user-turn text sent to the engine. Each attachment is appended
+    /// as its own `[File: name]` block with the extracted body, in the order given.
+    static func userText(content: String, attachments: [(name: String, text: String)]) -> String {
+        guard !attachments.isEmpty else { return content }
+        let blocks = attachments.map { "[File: \($0.name)]\n\($0.text)" }
+        return ([content] + blocks).joined(separator: "\n\n")
     }
 
-    /// Estimate tokens as ~4 chars each; keep the newest messages within 70% of the
-    /// context window, dropping oldest user/assistant pairs. The final (pending) message
-    /// is never dropped, even if it alone exceeds the budget.
+    /// Backward-compatible single-attachment overload.
+    static func userText(content: String, attachmentName: String?, attachmentText: String?) -> String {
+        guard let name = attachmentName, let text = attachmentText else { return content }
+        return userText(content: content, attachments: [(name: name, text: text)])
+    }
+
+    /// Estimate tokens as ~4 chars each. Used both for history trimming and for the
+    /// pre-flight "will this fit?" check the composer runs before a file is attached
+    /// or a message is sent.
+    static func estimatedTokens(_ text: String) -> Int { (text.count + 3) / 4 }
+
+    /// The usable token budget for a given model context size: 70% of the window
+    /// (capped at 131,072), leaving headroom for the reply and template overhead.
+    static func budget(ctxTokens: Int) -> Int {
+        Int(Double(min(ctxTokens, 131_072)) * 0.7)
+    }
+
+    /// Keep the newest messages within `budget(ctxTokens:)`, dropping oldest
+    /// user/assistant pairs. The final (pending) message is never dropped, even if
+    /// it alone exceeds the budget — callers that attach files should check
+    /// `attachmentsExceedBudget` before sending so that case doesn't happen silently.
     static func trimmed(history: [EngineMessage], ctxTokens: Int) -> [EngineMessage] {
-        let budget = Int(Double(min(ctxTokens, 131_072)) * 0.7)
-        func tokens(_ message: EngineMessage) -> Int { (message.text.count + 3) / 4 }
+        let budget = budget(ctxTokens: ctxTokens)
+        func tokens(_ message: EngineMessage) -> Int { estimatedTokens(message.text) }
 
         var total = history.reduce(0) { $0 + tokens($1) }
         guard total > budget, history.count > 1 else { return history }
@@ -40,5 +59,28 @@ enum PromptBuilder {
             }
         }
         return result
+    }
+
+    /// Pre-flight check for the composer: does the draft text plus every pending
+    /// attachment already exceed the model's usable budget, on its own, before any
+    /// prior conversation history is even considered? If so, sending would either
+    /// get silently truncated by the model or fail outright — the composer should
+    /// warn the user and let them remove a file instead of finding out after the
+    /// call to the API.
+    static func attachmentsExceedBudget(
+        draft: String,
+        attachments: [(name: String, text: String)],
+        ctxTokens: Int
+    ) -> Bool {
+        estimatedPendingTurnTokens(draft: draft, attachments: attachments) > budget(ctxTokens: ctxTokens)
+    }
+
+    static func estimatedPendingTurnTokens(
+        draft: String,
+        attachments: [(name: String, text: String)]
+    ) -> Int {
+        let draftTokens = estimatedTokens(draft)
+        let attachmentTokens = attachments.reduce(0) { $0 + estimatedTokens($1.text) }
+        return draftTokens + attachmentTokens
     }
 }

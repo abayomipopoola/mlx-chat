@@ -35,12 +35,12 @@ struct MessageView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
 
-                    if let name = message.attachmentName {
+                    ForEach(message.attachments, id: \.name) { file in
                         HStack(spacing: 6) {
                             Image(systemName: "doc.fill")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(Color.iconBlue)
-                            Text(name)
+                            Text(file.name)
                                 .font(Studio.sans(12.5))
                                 .lineLimit(1)
                         }

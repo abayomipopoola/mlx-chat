@@ -57,8 +57,7 @@ final class ConversationStore {
         to conversation: Conversation,
         modelID: String? = nil,
         imageData: Data? = nil,
-        attachmentName: String? = nil,
-        attachmentText: String? = nil
+        attachments: [(name: String, text: String)] = []
     ) -> ChatMessage {
         let nextIndex = (conversation.orderedMessages.last?.sortIndex ?? -1) + 1
         let message = ChatMessage(
@@ -67,8 +66,7 @@ final class ConversationStore {
             sortIndex: nextIndex,
             modelID: modelID,
             imageData: imageData,
-            attachmentName: attachmentName,
-            attachmentText: attachmentText)
+            attachments: attachments)
         message.conversation = conversation
         context.insert(message)
         conversation.updatedAt = .now

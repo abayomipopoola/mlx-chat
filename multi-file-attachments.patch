@@ -1,0 +1,706 @@
+diff --git a/MLXChat/App/ChatController.swift b/MLXChat/App/ChatController.swift
+index 1902a9e..4db691a 100644
+--- a/MLXChat/App/ChatController.swift
++++ b/MLXChat/App/ChatController.swift
+@@ -112,6 +112,16 @@ final class ChatController {
+         modelStore.model(for: selectedModelID)?.supportsVision == true
+     }
+ 
++    /// Usable context window for the selected model, in tokens — the same figure
++    /// each engine trims history against. The composer uses this to warn before a
++    /// send, rather than the model silently truncating or failing on it.
++    var selectedModelContextTokens: Int {
++        if selectedModelID == appleIntelligenceEngineID {
++            return AppleIntelligenceEngine.contextTokens
++        }
++        return modelStore.model(for: selectedModelID)?.runtimeContextTokens ?? 4096
++    }
++
+     /// True while the selected local model is downloading or loading into RAM.
+     /// The composer stays inert until that finishes so a send cannot race load.
+     var isSelectedModelPreparing: Bool {
+@@ -126,11 +136,11 @@ final class ChatController {
+         _ text: String,
+         in conversation: Conversation,
+         image: Data? = nil,
+-        attachment: (name: String, text: String)? = nil
++        attachments: [(name: String, text: String)] = []
+     ) {
+         guard !isStreaming, !isSelectedModelPreparing, let store = conversationStore else { return }
+         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+-        guard !trimmed.isEmpty || image != nil || attachment != nil else { return }
++        guard !trimmed.isEmpty || image != nil || !attachments.isEmpty else { return }
+         errorBanner = nil
+         retryConversation = nil
+         store.appendMessage(
+@@ -138,8 +148,7 @@ final class ChatController {
+             content: trimmed,
+             to: conversation,
+             imageData: image,
+-            attachmentName: attachment?.name,
+-            attachmentText: attachment?.text)
++            attachments: attachments)
+ 
+ #if DEBUG
+         // The release-demo recorder still exercises the real composer and
+@@ -293,8 +302,7 @@ final class ChatController {
+             if message.isUser {
+                 let text = PromptBuilder.userText(
+                     content: message.content,
+-                    attachmentName: message.attachmentName,
+-                    attachmentText: message.attachmentText)
++                    attachments: message.attachments)
+                 // Images only on the final pending user turn, and only for VLMs.
+                 let images: [Data]
+                 if supportsVision,
+diff --git a/MLXChat/Data/ConversationStore.swift b/MLXChat/Data/ConversationStore.swift
+index d11e953..71c9b7e 100644
+--- a/MLXChat/Data/ConversationStore.swift
++++ b/MLXChat/Data/ConversationStore.swift
+@@ -57,8 +57,7 @@ final class ConversationStore {
+         to conversation: Conversation,
+         modelID: String? = nil,
+         imageData: Data? = nil,
+-        attachmentName: String? = nil,
+-        attachmentText: String? = nil
++        attachments: [(name: String, text: String)] = []
+     ) -> ChatMessage {
+         let nextIndex = (conversation.orderedMessages.last?.sortIndex ?? -1) + 1
+         let message = ChatMessage(
+@@ -67,8 +66,7 @@ final class ConversationStore {
+             sortIndex: nextIndex,
+             modelID: modelID,
+             imageData: imageData,
+-            attachmentName: attachmentName,
+-            attachmentText: attachmentText)
++            attachments: attachments)
+         message.conversation = conversation
+         context.insert(message)
+         conversation.updatedAt = .now
+diff --git a/MLXChat/Data/Models.swift b/MLXChat/Data/Models.swift
+index 1da064f..80b7dd2 100644
+--- a/MLXChat/Data/Models.swift
++++ b/MLXChat/Data/Models.swift
+@@ -46,10 +46,17 @@ final class ChatMessage {
+     var modelID: String?
+     /// Downscaled JPEG payload for a vision attachment (user messages only).
+     @Attribute(.externalStorage) var imageData: Data?
+-    /// Display name of an attached file (user messages only).
++    /// Display name of an attached file (user messages only). Kept for lightweight
++    /// migration of conversations saved before multi-file attachments; new messages
++    /// leave this nil and use `attachmentNames`/`attachmentTexts` instead.
+     var attachmentName: String?
+-    /// Extracted text of an attached file, length-capped at extraction time.
++    /// Extracted text of an attached file, length-capped at extraction time. See
++    /// `attachmentName` above.
+     var attachmentText: String?
++    /// Display names of attached files (user messages only), in attach order.
++    var attachmentNames: [String] = []
++    /// Extracted text of each attached file, index-aligned with `attachmentNames`.
++    var attachmentTexts: [String] = []
+     var conversation: Conversation?
+ 
+     init(
+@@ -58,8 +65,7 @@ final class ChatMessage {
+         sortIndex: Int,
+         modelID: String? = nil,
+         imageData: Data? = nil,
+-        attachmentName: String? = nil,
+-        attachmentText: String? = nil
++        attachments: [(name: String, text: String)] = []
+     ) {
+         self.id = UUID()
+         self.role = role
+@@ -68,9 +74,19 @@ final class ChatMessage {
+         self.sortIndex = sortIndex
+         self.modelID = modelID
+         self.imageData = imageData
+-        self.attachmentName = attachmentName
+-        self.attachmentText = attachmentText
++        self.attachmentNames = attachments.map(\.name)
++        self.attachmentTexts = attachments.map(\.text)
+     }
+ 
+     var isUser: Bool { role == "user" }
++
++    /// All attachments on this message, old single-file data and new multi-file
++    /// data alike, name/text index-aligned.
++    var attachments: [(name: String, text: String)] {
++        if !attachmentNames.isEmpty {
++            return zip(attachmentNames, attachmentTexts).map { (name: $0, text: $1) }
++        }
++        guard let name = attachmentName, let text = attachmentText else { return [] }
++        return [(name: name, text: text)]
++    }
+ }
+diff --git a/MLXChat/Engine/PromptBuilder.swift b/MLXChat/Engine/PromptBuilder.swift
+index bc5934d..a68cb11 100644
+--- a/MLXChat/Engine/PromptBuilder.swift
++++ b/MLXChat/Engine/PromptBuilder.swift
+@@ -14,19 +14,38 @@ enum PromptBuilder {
+         return preset.isEmpty ? basePrompt : preset + "\n\n" + basePrompt
+     }
+ 
+-    /// Compose the user-turn text sent to the engine. When a file attachment is
+-    /// present, appends a `[File: name]` block with the extracted body.
++    /// Compose the user-turn text sent to the engine. Each attachment is appended
++    /// as its own `[File: name]` block with the extracted body, in the order given.
++    static func userText(content: String, attachments: [(name: String, text: String)]) -> String {
++        guard !attachments.isEmpty else { return content }
++        let blocks = attachments.map { "[File: \($0.name)]\n\($0.text)" }
++        return ([content] + blocks).joined(separator: "\n\n")
++    }
++
++    /// Backward-compatible single-attachment overload.
+     static func userText(content: String, attachmentName: String?, attachmentText: String?) -> String {
+         guard let name = attachmentName, let text = attachmentText else { return content }
+-        return content + "\n\n[File: \(name)]\n\(text)"
++        return userText(content: content, attachments: [(name: name, text: text)])
++    }
++
++    /// Estimate tokens as ~4 chars each. Used both for history trimming and for the
++    /// pre-flight "will this fit?" check the composer runs before a file is attached
++    /// or a message is sent.
++    static func estimatedTokens(_ text: String) -> Int { (text.count + 3) / 4 }
++
++    /// The usable token budget for a given model context size: 70% of the window
++    /// (capped at 131,072), leaving headroom for the reply and template overhead.
++    static func budget(ctxTokens: Int) -> Int {
++        Int(Double(min(ctxTokens, 131_072)) * 0.7)
+     }
+ 
+-    /// Estimate tokens as ~4 chars each; keep the newest messages within 70% of the
+-    /// context window, dropping oldest user/assistant pairs. The final (pending) message
+-    /// is never dropped, even if it alone exceeds the budget.
++    /// Keep the newest messages within `budget(ctxTokens:)`, dropping oldest
++    /// user/assistant pairs. The final (pending) message is never dropped, even if
++    /// it alone exceeds the budget — callers that attach files should check
++    /// `attachmentsExceedBudget` before sending so that case doesn't happen silently.
+     static func trimmed(history: [EngineMessage], ctxTokens: Int) -> [EngineMessage] {
+-        let budget = Int(Double(min(ctxTokens, 131_072)) * 0.7)
+-        func tokens(_ message: EngineMessage) -> Int { (message.text.count + 3) / 4 }
++        let budget = budget(ctxTokens: ctxTokens)
++        func tokens(_ message: EngineMessage) -> Int { estimatedTokens(message.text) }
+ 
+         var total = history.reduce(0) { $0 + tokens($1) }
+         guard total > budget, history.count > 1 else { return history }
+@@ -41,4 +60,27 @@ enum PromptBuilder {
+         }
+         return result
+     }
++
++    /// Pre-flight check for the composer: does the draft text plus every pending
++    /// attachment already exceed the model's usable budget, on its own, before any
++    /// prior conversation history is even considered? If so, sending would either
++    /// get silently truncated by the model or fail outright — the composer should
++    /// warn the user and let them remove a file instead of finding out after the
++    /// call to the API.
++    static func attachmentsExceedBudget(
++        draft: String,
++        attachments: [(name: String, text: String)],
++        ctxTokens: Int
++    ) -> Bool {
++        estimatedPendingTurnTokens(draft: draft, attachments: attachments) > budget(ctxTokens: ctxTokens)
++    }
++
++    static func estimatedPendingTurnTokens(
++        draft: String,
++        attachments: [(name: String, text: String)]
++    ) -> Int {
++        let draftTokens = estimatedTokens(draft)
++        let attachmentTokens = attachments.reduce(0) { $0 + estimatedTokens($1.text) }
++        return draftTokens + attachmentTokens
++    }
+ }
+diff --git a/MLXChat/Support/AttachmentPicker.swift b/MLXChat/Support/AttachmentPicker.swift
+index 4023f71..7d0d813 100644
+--- a/MLXChat/Support/AttachmentPicker.swift
++++ b/MLXChat/Support/AttachmentPicker.swift
+@@ -12,8 +12,12 @@ enum AttachmentPicker {
+ 
+     enum FileResult {
+         case cancelled
++        /// Every selected file failed to read (e.g. a single unsupported file).
+         case failed(String)
+-        case picked(name: String, text: String)
++        /// `files` succeeded; `failures` lists any selected files that didn't
++        /// (per-file name + reason), so a partial success still surfaces what
++        /// went wrong instead of failing the whole pick silently.
++        case picked(files: [(name: String, text: String)], failures: [(name: String, reason: String)])
+     }
+ 
+     /// Content types accepted by the file attachment panel.
+@@ -46,21 +50,33 @@ enum AttachmentPicker {
+         return .picked(data: data, preview: preview)
+     }
+ 
+-    /// Presents a file open panel and extracts text. Returns `.cancelled` if dismissed.
++    /// Presents a file open panel allowing multiple selections and extracts text
++    /// from each. Returns `.cancelled` if dismissed without picking anything.
++    /// Files that fail to extract don't block the ones that succeed — they're
++    /// reported back in `failures` instead.
+     static func pickFile() -> FileResult {
+         let panel = NSOpenPanel()
+-        panel.allowsMultipleSelection = false
++        panel.allowsMultipleSelection = true
+         panel.canChooseDirectories = false
+         panel.canChooseFiles = true
+         panel.allowedContentTypes = fileContentTypes
+-        panel.message = "Choose a PDF or text file"
+-        guard panel.runModal() == .OK, let url = panel.url else { return .cancelled }
++        panel.message = "Choose PDF or text files"
++        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return .cancelled }
++
++        var files: [(name: String, text: String)] = []
++        var failures: [(name: String, reason: String)] = []
++        for url in panel.urls {
++            do {
++                let text = try FileTextExtractor.extract(url: url)
++                files.append((name: url.lastPathComponent, text: text))
++            } catch {
++                failures.append((name: url.lastPathComponent, reason: error.localizedDescription))
++            }
++        }
+ 
+-        do {
+-            let text = try FileTextExtractor.extract(url: url)
+-            return .picked(name: url.lastPathComponent, text: text)
+-        } catch {
+-            return .failed(error.localizedDescription)
++        if files.isEmpty, let first = failures.first {
++            return .failed(first.reason)
+         }
++        return .picked(files: files, failures: failures)
+     }
+ }
+diff --git a/MLXChat/Views/ChatScreen.swift b/MLXChat/Views/ChatScreen.swift
+index 6148795..38f4b2c 100644
+--- a/MLXChat/Views/ChatScreen.swift
++++ b/MLXChat/Views/ChatScreen.swift
+@@ -227,7 +227,7 @@ struct ChatScreen: View {
+             text,
+             in: target,
+             image: attachments.imageData,
+-            attachment: attachments.attachment)
++            attachments: attachments.files)
+     }
+ 
+     private func regenerateAction(
+diff --git a/MLXChat/Views/ComposerSubviews.swift b/MLXChat/Views/ComposerSubviews.swift
+index 74b9bb2..d68d407 100644
+--- a/MLXChat/Views/ComposerSubviews.swift
++++ b/MLXChat/Views/ComposerSubviews.swift
+@@ -5,12 +5,16 @@ import SwiftUI
+ 
+ struct PendingAttachmentStrip: View {
+     let pendingImagePreview: NSImage?
+-    let pendingFileName: String?
++    /// One chip per pending file, in attach order.
++    let pendingFiles: [(name: String, text: String)]
+     let onClearImage: () -> Void
+-    let onClearFile: () -> Void
++    /// Called with the name of the chip that was cleared.
++    let onClearFile: (String) -> Void
+ 
+     var body: some View {
+-        HStack(spacing: 10) {
++        // Wraps onto additional lines once several files are attached, rather
++        // than letting the strip scroll off the edge of the composer.
++        FlowLayout(spacing: 8) {
+             if let preview = pendingImagePreview {
+                 ZStack(alignment: .topTrailing) {
+                     Image(nsImage: preview)
+@@ -23,16 +27,16 @@ struct PendingAttachmentStrip: View {
+                 }
+             }
+ 
+-            if let name = pendingFileName {
++            ForEach(pendingFiles, id: \.name) { file in
+                 HStack(spacing: 6) {
+                     Image(systemName: "doc.fill")
+                         .font(.system(size: 12, weight: .medium))
+                         .foregroundStyle(Color.iconBlue)
+-                    Text(name)
++                    Text(file.name)
+                         .font(Studio.sans(12.5))
+                         .lineLimit(1)
+                         .foregroundStyle(.primary)
+-                    clearChipButton { onClearFile() }
++                    clearChipButton { onClearFile(file.name) }
+                 }
+                 .padding(.leading, 10)
+                 .padding(.trailing, 6)
+@@ -40,8 +44,6 @@ struct PendingAttachmentStrip: View {
+                 .studioQuietFill(in: Capsule())
+                 .accessibilityIdentifier("composerAttachmentChip")
+             }
+-
+-            Spacer(minLength: 0)
+         }
+     }
+ 
+@@ -56,6 +58,48 @@ struct PendingAttachmentStrip: View {
+     }
+ }
+ 
++/// Minimal left-to-right wrapping layout for a row of chips that may overflow
++/// onto more than one line (SwiftUI has no built-in flow layout pre-macOS 26 HIG
++/// components; this keeps the strip simple and dependency-free).
++private struct FlowLayout: Layout {
++    var spacing: CGFloat = 8
++
++    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
++        let maxWidth = proposal.width ?? .infinity
++        var origin = CGPoint.zero
++        var lineHeight: CGFloat = 0
++        var totalHeight: CGFloat = 0
++        for subview in subviews {
++            let size = subview.sizeThatFits(.unspecified)
++            if origin.x + size.width > maxWidth, origin.x > 0 {
++                origin.x = 0
++                origin.y += lineHeight + spacing
++                lineHeight = 0
++            }
++            origin.x += size.width + spacing
++            lineHeight = max(lineHeight, size.height)
++            totalHeight = origin.y + lineHeight
++        }
++        return CGSize(width: maxWidth.isFinite ? maxWidth : origin.x, height: totalHeight)
++    }
++
++    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
++        var origin = CGPoint(x: bounds.minX, y: bounds.minY)
++        var lineHeight: CGFloat = 0
++        for subview in subviews {
++            let size = subview.sizeThatFits(.unspecified)
++            if origin.x + size.width > bounds.maxX, origin.x > bounds.minX {
++                origin.x = bounds.minX
++                origin.y += lineHeight + spacing
++                lineHeight = 0
++            }
++            subview.place(at: origin, proposal: ProposedViewSize(size))
++            origin.x += size.width + spacing
++            lineHeight = max(lineHeight, size.height)
++        }
++    }
++}
++
+ // MARK: - Status
+ 
+ struct ComposerStatusRows: View {
+diff --git a/MLXChat/Views/ComposerView.swift b/MLXChat/Views/ComposerView.swift
+index 44f49c0..bc9a1ac 100644
+--- a/MLXChat/Views/ComposerView.swift
++++ b/MLXChat/Views/ComposerView.swift
+@@ -4,9 +4,9 @@ import SwiftUI
+ /// Payload handed from the composer to ChatScreen on send.
+ struct ComposerAttachments {
+     var imageData: Data? = nil
+-    var attachment: (name: String, text: String)? = nil
++    var files: [(name: String, text: String)] = []
+ 
+-    var isEmpty: Bool { imageData == nil && attachment == nil }
++    var isEmpty: Bool { imageData == nil && files.isEmpty }
+ }
+ 
+ /// Bottom input area: engine status rows, error banner, growing text field, send/stop.
+@@ -19,12 +19,31 @@ struct ComposerView: View {
+ 
+     @State private var pendingImageData: Data?
+     @State private var pendingImagePreview: NSImage?
+-    @State private var pendingFileName: String?
+-    @State private var pendingFileText: String?
++    @State private var pendingFiles: [(name: String, text: String)] = []
+     @State private var attachHovered = false
+ 
+     private var hasPendingAttachment: Bool {
+-        pendingImageData != nil || pendingFileName != nil
++        pendingImageData != nil || !pendingFiles.isEmpty
++    }
++
++    /// Estimated combined size of the draft plus every pending file, checked
++    /// against the selected model's usable context window. When this is true,
++    /// sending now would either get silently truncated or fail once it reaches
++    /// the model, so the composer blocks the send and surfaces a warning instead.
++    private var attachmentsExceedContext: Bool {
++        PromptBuilder.attachmentsExceedBudget(
++            draft: draft,
++            attachments: pendingFiles,
++            ctxTokens: chat.selectedModelContextTokens)
++    }
++
++    private var contextWarning: String? {
++        guard !pendingFiles.isEmpty, attachmentsExceedContext else { return nil }
++        let budget = PromptBuilder.budget(ctxTokens: chat.selectedModelContextTokens)
++        let estimated = PromptBuilder.estimatedPendingTurnTokens(draft: draft, attachments: pendingFiles)
++        return "These attachments are too large for \(chat.selectedModelDisplayName) "
++            + "(~\(estimated.formatted()) tokens vs. a ~\(budget.formatted()) token budget). "
++            + "Remove a file, or pick a model with a bigger context window."
+     }
+ 
+     /// Non-allocating draft check (no intermediate trimmed String).
+@@ -38,19 +57,20 @@ struct ComposerView: View {
+         (draftHasContent || hasPendingAttachment)
+             && !chat.isStreaming
+             && !isPreparing
++            && !attachmentsExceedContext
+     }
+ 
+     private var sendHelp: String {
+         if isPreparing { return "Wait until the model finishes loading" }
+         if chat.isStreaming { return "Stop generating" }
++        if attachmentsExceedContext { return "Attachments are too large for this model's context window" }
+         return "Send"
+     }
+ 
+-    /// Photo and file attach both need a vision model.
+-    private var showsAttachMenu: Bool {
+-        ProcessInfo.processInfo.arguments.contains("--fake-vision-support")
+-            || chat.selectedModelSupportsVision
+-    }
++    /// File attach works with any model — it's plain text appended to the
++    /// prompt. Photo attach still needs a vision-capable model, gated
++    /// separately inside `AttachPanel`.
++    private var showsAttachMenu: Bool { true }
+ 
+     var body: some View {
+         // Evaluate once per body pass (send button reads this three times).
+@@ -61,13 +81,19 @@ struct ComposerView: View {
+         VStack(spacing: 8) {
+             ComposerStatusRows()
+ 
++            if let warning = contextWarning {
++                ContextWarningBanner(message: warning)
++                    .frame(maxWidth: 720)
++                    .frame(maxWidth: .infinity)
++            }
++
+             VStack(alignment: .leading, spacing: 0) {
+                 if hasPendingAttachment {
+                     PendingAttachmentStrip(
+                         pendingImagePreview: pendingImagePreview,
+-                        pendingFileName: pendingFileName,
++                        pendingFiles: pendingFiles,
+                         onClearImage: clearPendingImage,
+-                        onClearFile: clearPendingFile)
++                        onClearFile: { name in clearPendingFile(named: name) })
+                         .padding(.horizontal, 14)
+                         .padding(.top, 8)
+                 }
+@@ -124,8 +150,7 @@ struct ComposerView: View {
+             dropdown.attachFile = { pickFile() }
+             // UI-verification hook: seed a pending file chip without NSOpenPanel.
+             if ProcessInfo.processInfo.arguments.contains("--seed-attachment") {
+-                pendingFileName = "notes.txt"
+-                pendingFileText = "hello"
++                pendingFiles = [(name: "notes.txt", text: "hello")]
+             }
+             // UI-verification hook: force ErrorBannerRow to render.
+             if ProcessInfo.processInfo.arguments.contains("--seed-error-banner") {
+@@ -211,9 +236,14 @@ struct ComposerView: View {
+             return
+         case .failed(let message):
+             chat.errorBanner = message
+-        case .picked(let name, let text):
+-            pendingFileName = name
+-            pendingFileText = text
++        case .picked(let files, let failures):
++            pendingFiles.append(contentsOf: files)
++            if !failures.isEmpty {
++                let names = failures.map(\.name).joined(separator: ", ")
++                chat.errorBanner = failures.count == 1
++                    ? "Couldn't read \(names): \(failures[0].reason)"
++                    : "Couldn't read \(failures.count) files: \(names)"
++            }
+         }
+     }
+ 
+@@ -223,17 +253,14 @@ struct ComposerView: View {
+         draft = ""
+         let attachments = ComposerAttachments(
+             imageData: pendingImageData,
+-            attachment: pendingFileName.flatMap { name in
+-                guard let body = pendingFileText else { return nil }
+-                return (name: name, text: body)
+-            })
++            files: pendingFiles)
+         clearPending()
+         onSend(text, attachments)
+     }
+ 
+     private func clearPending() {
+         clearPendingImage()
+-        clearPendingFile()
++        pendingFiles.removeAll()
+     }
+ 
+     private func clearPendingImage() {
+@@ -241,15 +268,48 @@ struct ComposerView: View {
+         pendingImagePreview = nil
+     }
+ 
+-    private func clearPendingFile() {
+-        pendingFileName = nil
+-        pendingFileText = nil
++    /// Removes one pending file by name (chips clear individually).
++    private func clearPendingFile(named name: String) {
++        pendingFiles.removeAll { $0.name == name }
++    }
++}
++
++/// Non-blocking banner shown above the composer when pending attachments won't
++/// fit the selected model's context window. Send stays disabled while this shows.
++private struct ContextWarningBanner: View {
++    let message: String
++
++    var body: some View {
++        HStack(alignment: .top, spacing: 8) {
++            Image(systemName: "exclamationmark.triangle.fill")
++                .font(.system(size: 12, weight: .medium))
++                .foregroundStyle(.orange)
++            Text(message)
++                .font(Studio.sans(12))
++                .foregroundStyle(.primary)
++            Spacer(minLength: 0)
++        }
++        .padding(.horizontal, 12)
++        .padding(.vertical, 8)
++        .background(
++            RoundedRectangle(cornerRadius: 10, style: .continuous)
++                .fill(Color.orange.opacity(0.12)))
++        .padding(.horizontal, 32)
++        .accessibilityIdentifier("composerContextWarningBanner")
+     }
+ }
+ 
+ /// In-window attach popup: title plus icon rows, matching the header dropdowns.
+ struct AttachPanel: View {
+     @Environment(HeaderDropdown.self) private var dropdown
++    @Environment(ChatController.self) private var chat
++
++    /// Photo attach needs a vision-capable model; file attach (plain text
++    /// appended to the prompt) works with any model, so it's never gated.
++    private var showsPhotoRow: Bool {
++        ProcessInfo.processInfo.arguments.contains("--fake-vision-support")
++            || chat.selectedModelSupportsVision
++    }
+ 
+     var body: some View {
+         VStack(alignment: .leading, spacing: 2) {
+@@ -259,11 +319,13 @@ struct AttachPanel: View {
+                 .padding(.horizontal, 8)
+                 .padding(.bottom, 4)
+ 
+-            attachRow(title: "Photo or Image…", systemImage: "photo") {
+-                dropdown.open = nil
+-                dropdown.attachPhoto?()
++            if showsPhotoRow {
++                attachRow(title: "Photo or Image…", systemImage: "photo") {
++                    dropdown.open = nil
++                    dropdown.attachPhoto?()
++                }
+             }
+-            attachRow(title: "File…", systemImage: "doc") {
++            attachRow(title: "Files…", systemImage: "doc") {
+                 dropdown.open = nil
+                 dropdown.attachFile?()
+             }
+diff --git a/MLXChat/Views/MessageView.swift b/MLXChat/Views/MessageView.swift
+index b7a3bcb..0553136 100644
+--- a/MLXChat/Views/MessageView.swift
++++ b/MLXChat/Views/MessageView.swift
+@@ -35,12 +35,12 @@ struct MessageView: View {
+                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                     }
+ 
+-                    if let name = message.attachmentName {
++                    ForEach(message.attachments, id: \.name) { file in
+                         HStack(spacing: 6) {
+                             Image(systemName: "doc.fill")
+                                 .font(.system(size: 12, weight: .medium))
+                                 .foregroundStyle(Color.iconBlue)
+-                            Text(name)
++                            Text(file.name)
+                                 .font(Studio.sans(12.5))
+                                 .lineLimit(1)
+                         }
+diff --git a/Tests/MLXChatTests/AttachmentTests.swift b/Tests/MLXChatTests/AttachmentTests.swift
+index 6892bff..dea6266 100644
+--- a/Tests/MLXChatTests/AttachmentTests.swift
++++ b/Tests/MLXChatTests/AttachmentTests.swift
+@@ -101,6 +101,52 @@ import Testing
+         #expect(result == "Please summarize\n\n[File: notes.md]\nline one\nline two")
+     }
+ 
++    @Test func multipleAttachmentsComposeOneBlockEach() {
++        let result = PromptBuilder.userText(
++            content: "Compare these",
++            attachments: [
++                (name: "a.txt", text: "alpha"),
++                (name: "b.txt", text: "beta"),
++            ])
++        #expect(result == "Compare these\n\n[File: a.txt]\nalpha\n\n[File: b.txt]\nbeta")
++    }
++
++    @Test func noAttachmentsLeavesContentUnchanged() {
++        #expect(PromptBuilder.userText(content: "Hello", attachments: []) == "Hello")
++    }
++
++    // MARK: - PromptBuilder.attachmentsExceedBudget
++
++    @Test func smallAttachmentsFitBudget() {
++        let exceeds = PromptBuilder.attachmentsExceedBudget(
++            draft: "Summarize this",
++            attachments: [(name: "short.txt", text: "just a few words")],
++            ctxTokens: 32_768)
++        #expect(!exceeds)
++    }
++
++    @Test func oversizedAttachmentExceedsBudget() {
++        // ~4 chars/token estimate; budget for a 4096-token model is ~2867 tokens
++        // (~11,468 chars). A single file well past that should trip the check
++        // even though PromptBuilder.trimmed() would never drop this pending turn.
++        let hugeText = String(repeating: "a", count: 50_000)
++        let exceeds = PromptBuilder.attachmentsExceedBudget(
++            draft: "",
++            attachments: [(name: "huge.txt", text: hugeText)],
++            ctxTokens: 4_096)
++        #expect(exceeds)
++    }
++
++    @Test func multipleSmallAttachmentsCanCombineToExceedBudget() {
++        let chunk = String(repeating: "a", count: 4_000)  // ~1000 tokens each
++        let attachments = (0..<5).map { (name: "file\($0).txt", text: chunk) }  // ~5000 tokens
++        let exceeds = PromptBuilder.attachmentsExceedBudget(
++            draft: "",
++            attachments: attachments,
++            ctxTokens: 4_096)  // budget ~2867 tokens
++        #expect(exceeds)
++    }
++
+     // MARK: - Helpers
+ 
+     private func writeOnePagePDF(text: String, to url: URL) throws {
+diff --git a/Tests/MLXChatUITests/AttachmentFlowUITests.swift b/Tests/MLXChatUITests/AttachmentFlowUITests.swift
+index 54b0d4f..a4112e4 100644
+--- a/Tests/MLXChatUITests/AttachmentFlowUITests.swift
++++ b/Tests/MLXChatUITests/AttachmentFlowUITests.swift
+@@ -96,15 +96,15 @@ final class AttachmentFlowUITests: MLXUITestCase {
+         attach.click()
+ 
+         // Menu items can appear as menuItems or buttons depending on presentation.
+-        let menuFile = app.menuItems["File…"]
+-        let buttonFile = app.buttons["File…"]
++        let menuFile = app.menuItems["Files…"]
++        let buttonFile = app.buttons["Files…"]
+         let fileItem: XCUIElement
+         if menuFile.waitForExistence(timeout: 3) {
+             fileItem = menuFile
+         } else if buttonFile.waitForExistence(timeout: 2) {
+             fileItem = buttonFile
+         } else {
+-            XCTFail("File… menu item should appear")
++            XCTFail("Files… menu item should appear")
+             return
+         }
+         fileItem.click()

@@ -46,10 +46,17 @@ final class ChatMessage {
     var modelID: String?
     /// Downscaled JPEG payload for a vision attachment (user messages only).
     @Attribute(.externalStorage) var imageData: Data?
-    /// Display name of an attached file (user messages only).
+    /// Display name of an attached file (user messages only). Kept for lightweight
+    /// migration of conversations saved before multi-file attachments; new messages
+    /// leave this nil and use `attachmentNames`/`attachmentTexts` instead.
     var attachmentName: String?
-    /// Extracted text of an attached file, length-capped at extraction time.
+    /// Extracted text of an attached file, length-capped at extraction time. See
+    /// `attachmentName` above.
     var attachmentText: String?
+    /// Display names of attached files (user messages only), in attach order.
+    var attachmentNames: [String] = []
+    /// Extracted text of each attached file, index-aligned with `attachmentNames`.
+    var attachmentTexts: [String] = []
     var conversation: Conversation?
 
     init(
@@ -58,8 +65,7 @@ final class ChatMessage {
         sortIndex: Int,
         modelID: String? = nil,
         imageData: Data? = nil,
-        attachmentName: String? = nil,
-        attachmentText: String? = nil
+        attachments: [(name: String, text: String)] = []
     ) {
         self.id = UUID()
         self.role = role
@@ -68,9 +74,19 @@ final class ChatMessage {
         self.sortIndex = sortIndex
         self.modelID = modelID
         self.imageData = imageData
-        self.attachmentName = attachmentName
-        self.attachmentText = attachmentText
+        self.attachmentNames = attachments.map(\.name)
+        self.attachmentTexts = attachments.map(\.text)
     }
 
     var isUser: Bool { role == "user" }
+
+    /// All attachments on this message, old single-file data and new multi-file
+    /// data alike, name/text index-aligned.
+    var attachments: [(name: String, text: String)] {
+        if !attachmentNames.isEmpty {
+            return zip(attachmentNames, attachmentTexts).map { (name: $0, text: $1) }
+        }
+        guard let name = attachmentName, let text = attachmentText else { return [] }
+        return [(name: name, text: text)]
+    }
 }

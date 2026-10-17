@@ -116,6 +116,8 @@ public struct Model {
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
         case .qwen36:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        case .lfm2moe:
+            return try resident(name: "model.layers.\(L).feed_forward.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -136,6 +138,8 @@ public struct Model {
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
         case .qwen36:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
+        case .lfm2moe:
+            return "model.layers.\(L).feed_forward.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`

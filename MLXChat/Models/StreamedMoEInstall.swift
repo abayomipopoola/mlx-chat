@@ -4,13 +4,19 @@ import TurboFieldfare
 enum StreamedMoEArchitecture: String, Hashable, Sendable {
     case gemma4
     case qwen36
+    case lfm2moe
 
     var expectedArchitecture: ArchConfig {
         switch self {
         case .gemma4: .gemma4_26B_A4B
         case .qwen36: .qwen36_35B_A3B
+        case .lfm2moe: .lfm25_24B_A2B
         }
     }
+
+    /// LFM2's template always opens a thought span, so thinking cannot be
+    /// switched off for it.
+    var thinkingIsOptional: Bool { self != .lfm2moe }
 }
 
 struct StreamedMoEVariant: Identifiable, Hashable, Sendable {
@@ -167,7 +173,19 @@ enum StreamedMoEInstall {
         approximateDownloadBytes: 19_528_808_680,
         architecture: .qwen36)
 
-    static let variants = [standard, qat, qwen36, ornith15]
+    static let lfm25 = StreamedMoEVariant(
+        modelID: "streamed-moe/lfm2.5-24b-a2b-4bit",
+        sourceRepoID: "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+        sourceRevision: "667408d494bde191c2cb9dd4f4549827816b9275",
+        sourceIndexSHA256: "7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a",
+        displayName: "LFM2.5 24B A2B",
+        quantLabel: "4-bit · SSD",
+        helperModelArgument: "lfm25",
+        managedDirectoryName: "LFM2.5-24B-A2B.gturbo",
+        approximateDownloadBytes: 13_585_182_789,
+        architecture: .lfm2moe)
+
+    static let variants = [standard, qat, qwen36, ornith15, lfm25]
 
     /// Bookmark key used by the first streamed-MoE build, before the streamed
     /// install received its own app-local identity.

@@ -13,6 +13,7 @@ model first:
 - `gemma4-qat`: `mlx-community/gemma-4-26B-A4B-it-qat-4bit`
 - `qwen36`: `mlx-community/Qwen3.6-35B-A3B-4bit`
 - `ornith15`: `ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit`
+- `lfm25`: `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (local; see "LFM2 MoE" below)
 
 The old `--source standard|qat` spellings remain accepted as compatibility
 aliases for saved workflows.
@@ -115,3 +116,48 @@ Vision companion packs from `fd3c0b8b`, with these local changes:
   Ornith SSD identities never gain the attachment control. Ordinary MLX
   vision entries are unchanged.
 - No 0.6.0 rebase and no #148.
+
+## Upstream #182 (grouped full-attention decode, partial port)
+
+`attention_decode_full_grouped_vec_partial` and the `Attention` routing that
+selects it for the 512/16/2 full-attention shape, which only Gemma 4 uses. It
+removes the per-position threadgroup barriers of the generic partial kernel.
+Also ported: `ArchConfig.maxPositionEmbeddings`, the `KVCacheManager` guard
+that refuses a context past it, and `ModelError.kvAllocationFailed`.
+Not ported: `ContextAdmission` and the 256K context options; MLX Chat keeps
+its own 4K–32K settings.
+
+## Upstream #159 (TensorOps prefill by capability, ported)
+
+`PrefillAttention` builds the MSL 4 TensorOps full-prefill pipeline on any
+device that compiles it instead of gating it on Apple10, and keeps the
+causal-tiled path as the fallback. The TensorOps shape now also requires a
+full-attention layer and a window that never clips. Command-buffer checks read
+`status` as well as `error`, because a failed buffer may carry no error
+object, and `MetalContext.makeSystemDefaultDevice` sets
+`AGX_RELAX_CDM_CTXSTORE_TIMEOUT` before the first device is created.
+
+## LFM2 MoE (local)
+
+LiquidAI's LFM2.5-24B-A2B streams from SSD through its own decode runner,
+`LFM2MoEForwardRunner`, so Gemma and Qwen keep `RealForwardRunner` unchanged.
+
+- Repack: `ArchInfo` reads the flat `lfm2_moe` config (layer mask 3 for gated
+  short convolution, `linearConvKernelSize` carries `conv_L_cache`) and
+  cross-checks the pinned shape. The planner accepts root `model.*` names and
+  `feed_forward.switch_mlp` experts. The two dense-FFN layers own no experts,
+  so only the 38 routed layers are packed, as packed layers 0–37; manifest and
+  layout `numLayers` now record the packed count (equal to the model's for
+  Gemma and Qwen). Logical shapes multiply before dividing so 6-bit tensors
+  size correctly.
+- Manifest: LFM records a 6-bit embedding, a 32-bit (unquantized float32)
+  router, and 4-bit dense FFN; `ManifestReader` accepts those for the family.
+- Runtime: a private `lfm2` Metal module adds the 6-bit embedding lookup, the
+  6-bit tied lm_head GEMV, and the short-convolution decode step. The router
+  runs on the CPU (sigmoid scores, `expert_bias` for selection only, top-4
+  renormalized). The streamed-expert kernels are fixed at eight slots, so the
+  four experts are dispatched twice with the second copy weighted zero.
+  `Attention.maxQHeads` is 32 for LFM's 32 query heads.
+- Prompts run token by token; there is no chunked LFM prefill.
+- Tokenizer: `ChatMLFamily.lfm` prepends `<|startoftext|>`, resolves
+  `<|tool_call_start|>` markers, and uses a 128,000-row vocabulary.

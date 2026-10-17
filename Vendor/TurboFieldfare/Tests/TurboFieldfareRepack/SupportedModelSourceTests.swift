@@ -6,7 +6,7 @@ final class SupportedModelSourceTests: XCTestCase {
     func testAllPinnedSourcesRemainDistinctAndSelectable() {
         let sources = SupportedModelSource.all
 
-        XCTAssertEqual(sources.map(\.name), ["gemma4", "gemma4-qat", "qwen36", "ornith15"])
+        XCTAssertEqual(sources.map(\.name), ["gemma4", "gemma4-qat", "qwen36", "ornith15", "lfm25"])
         XCTAssertEqual(Set(sources.map(\.repoID)).count, sources.count)
         XCTAssertEqual(Set(sources.map(\.revision)).count, sources.count)
         XCTAssertEqual(Set(sources.map(\.sourceIndexSHA256)).count, sources.count)

@@ -113,7 +113,8 @@ private actor StreamedMoESession {
         let context: MetalContext
         let tokenizer: GFTokenizer
         let model: Model
-        let runner: RealForwardRunner
+        let runner: any ContinuableLogitProducer
+        let maxContext: Int
         let scratch: RawCompletionScratch
         let settings: StreamedMoERuntimeSettings
         var vision: VisionRuntime?
@@ -158,11 +159,19 @@ private actor StreamedMoESession {
         try Task.checkCancellation()
 
         progress(0.80)
-        let runner = try RealForwardRunner(
-            model: model,
-            context: context,
-            maxContext: settings.contextTokens,
-            runtimeConfiguration: runtimeConfiguration)
+        let runner: any ContinuableLogitProducer
+        if variant.architecture == .lfm2moe {
+            runner = try LFM2MoEForwardRunner(
+                model: model,
+                context: context,
+                maxContext: settings.contextTokens)
+        } else {
+            runner = try RealForwardRunner(
+                model: model,
+                context: context,
+                maxContext: settings.contextTokens,
+                runtimeConfiguration: runtimeConfiguration)
+        }
         let scratch = try RawCompletionScratch(
             context: context,
             vocab: model.config.vocabSize,
@@ -176,6 +185,7 @@ private actor StreamedMoESession {
             tokenizer: tokenizer,
             model: model,
             runner: runner,
+            maxContext: settings.contextTokens,
             scratch: scratch,
             settings: settings,
             vision: nil)
@@ -204,7 +214,8 @@ private actor StreamedMoESession {
             throw EngineError.generationFailed("No pending user message.")
         }
 
-        let thinkingEnabled = ThinkingPreference.isEnabled
+        let thinkingEnabled = loadedState.architecture.thinkingIsOptional
+            ? ThinkingPreference.isEnabled : true
         let wantsImages = trimmed.contains { !$0.images.isEmpty }
         let multimodalInput: MultimodalPrefillInput?
         let promptIDs: [Int32]
@@ -224,7 +235,7 @@ private actor StreamedMoESession {
                 thinkingEnabled: thinkingEnabled)
             promptIDs = tokenizer.encode(rendered, addBOS: false)
         }
-        let maxNewTokens = min(8_192, runner.maxContext - promptIDs.count)
+        let maxNewTokens = min(8_192, loadedState.maxContext - promptIDs.count)
         guard maxNewTokens > 0 else {
             throw EngineError.contextExceeded(
                 "This conversation exceeds the streamed model’s \(settings.contextTokens / 1_024)K in-memory context. Start a new chat, shorten the prompt, or raise Context in the model’s SSD settings.")
@@ -244,11 +255,12 @@ private actor StreamedMoESession {
             cache: kvCache,
             conversationID: conversationID,
             systemPrompt: systemPrompt,
-            thinkingEnabled: thinkingEnabled)
+            thinkingEnabled: thinkingEnabled,
+            allowsRewind: runner is LFM2MoEForwardRunner)
         if multimodalInput != nil { start = .reset }
-        if case .resume = start, !(runner is any ContinuableLogitProducer) {
-            start = .reset
-        }
+        // The LFM2 runner feeds the prompt one token at a time.
+        let prefillConfig: PrefillRuntimeConfig = loadedState.architecture == .lfm2moe
+            ? .off : .defaultChunked
 
         let result: RawDecodeResult
         do {
@@ -260,6 +272,7 @@ private actor StreamedMoESession {
                 config: config,
                 context: context,
                 scratch: scratch,
+                prefillConfig: prefillConfig,
                 start: start
             ) { progress in
                 switch progress {
@@ -452,6 +465,7 @@ enum StreamedMoEPrompt {
         static let chatMLTurnOpen = "<|im_start|>"
         static let chatMLTurnClose = "<|im_end|>"
         static let qwenThink = "<think>"
+        static let lfmBOS = "<|startoftext|>"
     }
 
     static func render(
@@ -469,7 +483,8 @@ enum StreamedMoEPrompt {
             case .chatml:
                 return renderChatMLThinkingPrompt(
                     history: history,
-                    systemPrompt: systemPrompt)
+                    systemPrompt: systemPrompt,
+                    family: tokenizer.chatMLFamily ?? .qwen)
             }
         }
 
@@ -506,9 +521,10 @@ enum StreamedMoEPrompt {
 
     static func renderChatMLThinkingPrompt(
         history: [EngineMessage],
-        systemPrompt: String
+        systemPrompt: String,
+        family: ChatMLFamily = .qwen
     ) -> String {
-        var prompt = ""
+        var prompt = family == .lfm ? Token.lfmBOS : ""
         let system = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !system.isEmpty {
             appendChatMLTurn(role: "system", content: system, to: &prompt)
@@ -519,7 +535,8 @@ enum StreamedMoEPrompt {
                 content: message.text.trimmingCharacters(in: .whitespacesAndNewlines),
                 to: &prompt)
         }
-        prompt += Token.chatMLTurnOpen + "assistant\n" + Token.qwenThink + "\n"
+        prompt += Token.chatMLTurnOpen + "assistant\n" + Token.qwenThink
+            + (family == .lfm ? "" : "\n")
         return prompt
     }
 

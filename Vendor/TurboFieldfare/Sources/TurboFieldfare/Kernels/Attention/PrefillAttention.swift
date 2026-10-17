@@ -56,12 +56,32 @@ final class PrefillAttention {
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
 
-    init(context: MetalContext) throws {
+    var tensorOps2DValidityV2Available: Bool {
+        psoFullTensorOps2DValidityV2 != nil
+    }
+
+    convenience init(context: MetalContext) throws {
+        try self.init(context: context, simulatingMissingTensorOps: false)
+    }
+
+    /// Tests can force the production fallback even on a host where the MSL 4
+    /// TensorOps pipeline builds.
+    init(context: MetalContext, simulatingMissingTensorOps: Bool) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
-        self.psoFullTensorOps2DValidityV2 = context.device.supportsFamily(.apple10)
-            ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
-            : nil
+        if simulatingMissingTensorOps {
+            self.psoFullTensorOps2DValidityV2 = nil
+        } else {
+            do {
+                self.psoFullTensorOps2DValidityV2 = try context.pipeline(
+                    "attention_prefill_full_tensorops_2d_validity_v2")
+            } catch {
+                self.psoFullTensorOps2DValidityV2 = nil
+                FileHandle.standardError.write(Data(
+                    ("PrefillAttention: TensorOps 2D pipeline unavailable; "
+                     + "using causal-tiled fallback: \(error)\n").utf8))
+            }
+        }
     }
 
     func encodeCausal(commandBuffer: MTLCommandBuffer,
@@ -85,11 +105,14 @@ final class PrefillAttention {
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2
-        // The pinned model uses 512/16/2 only for full attention; its
-        // sliding-window layers use 256/16/8. A future model that reuses this
-        // shape for sliding attention must add a full-visibility check here.
+        // TensorOps starts its key loop at zero and ignores slidingWindow, so
+        // these are visibility guards rather than shape optimizations.
+        let windowNeverClips = effectiveParams.slidingWindow == 0
+            || effectiveParams.slidingWindow >= effectiveParams.kvValidCount
         let tensorOpsShape = requestsTensorOps
+            && layerKind == .full
             && kvRingCapacity == 0
+            && windowNeverClips
             && effectiveParams.headDim == 512
             && effectiveParams.numQHeads == 16
             && effectiveParams.numKVHeads == 2
@@ -101,7 +124,7 @@ final class PrefillAttention {
             pipeline = tensorOpsPipeline
         } else if tensorOpsShape && path == .fullTensorOps2DValidityV2 {
             preconditionFailure(
-                "TensorOps 2D prefill attention requires Apple10 MPP tensor support")
+                "TensorOps 2D prefill attention pipeline is unavailable on this Metal stack")
         } else {
             // Explicit mode also falls back for incompatible shapes. Benchmark
             // fixtures must use 512/16/2 to prove that TensorOps ran.

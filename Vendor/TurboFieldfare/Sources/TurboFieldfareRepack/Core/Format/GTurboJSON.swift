@@ -122,7 +122,6 @@ enum GTurboJSON {
 
     static func encodeLayout(plan: RepackPlan,
                                     expertStride: UInt64) throws -> Data {
-        let arch = plan.arch
         var layersArr: [[String: Any]] = []
         layersArr.reserveCapacity(plan.layers.count)
         for lp in plan.layers {
@@ -163,10 +162,13 @@ enum GTurboJSON {
                 "experts": experts
             ])
         }
+        // Packed layers, which equal the model's layers for Gemma and Qwen
+        // but exclude LFM2's dense-FFN layers.
         let obj: [String: Any] = [
             "expertStride": expertStride,
-            "numLayers": arch.numLayers,
-            "expertsPerLayer": plan.layers.first?.expertsPerLayer ?? 0,
+            "numLayers": plan.layers.count,
+            "expertsPerLayer": plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer
+                ?? plan.layers.first?.expertsPerLayer ?? 0,
             "layers": layersArr
         ]
         return try JSONSerialization.data(withJSONObject: obj,

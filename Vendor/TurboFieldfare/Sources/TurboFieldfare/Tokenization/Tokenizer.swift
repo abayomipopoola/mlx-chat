@@ -28,6 +28,14 @@ public enum ChatDialect: String, Sendable {
     case chatml
 }
 
+/// Which ChatML model family a `.chatml` tokenizer belongs to. Qwen has no BOS
+/// and `<tool_call>` markers; LFM2 prepends `<|startoftext|>`, uses
+/// `<|tool_call_start|>` markers, and always opens a `<think>` span.
+public enum ChatMLFamily: String, Sendable {
+    case qwen
+    case lfm
+}
+
 /// Tokenizer wrapper for the supported model families (Gemma 4 and ChatML/Qwen).
 ///
 /// Prefers tokenizer sidecars in a completed `.gturbo/tokenizer/` directory,
@@ -45,6 +53,8 @@ public struct GFTokenizer: @unchecked Sendable {
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
 
     public let dialect: ChatDialect
+    /// Nil for Gemma.
+    public let chatMLFamily: ChatMLFamily?
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
@@ -139,11 +149,18 @@ public struct GFTokenizer: @unchecked Sendable {
 
         let dialect: ChatDialect =
             Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
-        let resolved = dialect == .chatml
-            ? try Self.resolveChatMLTokens(tokenizer)
-            : try Self.resolveGemmaTokens(tokenizer)
+        let family: ChatMLFamily? = dialect == .gemma ? nil
+            : Self.specialTokenID(tokenizer, Self.lfmBOSMark) != nil
+                && Self.specialTokenID(tokenizer, "<tool_call>") == nil ? .lfm : .qwen
+        let resolved: ResolvedSpecialTokens
+        switch family {
+        case nil: resolved = try Self.resolveGemmaTokens(tokenizer)
+        case .qwen: resolved = try Self.resolveChatMLTokens(tokenizer)
+        case .lfm: resolved = try Self.resolveLFMTokens(tokenizer)
+        }
 
         self.dialect = dialect
+        self.chatMLFamily = family
         self.bosID = resolved.bosID
         self.bosPrefixID = resolved.bosPrefixID
         self.eosID = resolved.eosID
@@ -279,6 +296,43 @@ public struct GFTokenizer: @unchecked Sendable {
             vocabSize: 248_320)
     }
 
+    /// LFM2 (LiquidAI) ChatML: `<|startoftext|>` is a real BOS prefix, tool
+    /// calls use `<|tool_call_start|>`/`<|tool_call_end|>`, and tool lists
+    /// stand in for the tool-response markers Qwen has.
+    private static func resolveLFMTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw GFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        _ = try id(Self.imStartMark)
+        let bos = try id(Self.lfmBOSMark)
+        let imEnd = try id(Self.imEndMark)
+        let endOfText = try id("<|endoftext|>")
+        let pad = (try? id("<|pad|>")) ?? endOfText
+        let thinkStart = try id("<think>")
+        let thinkEnd = try id("</think>")
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            bosPrefixID: bos,
+            eosID: imEnd,
+            padID: pad,
+            endOfTurnID: imEnd,
+            toolCallStartID: try id("<|tool_call_start|>"),
+            toolCallEndID: try id("<|tool_call_end|>"),
+            toolResponseID: try id("<|tool_list_start|>"),
+            toolResponseEndID: try id("<|tool_list_end|>"),
+            channelStartID: thinkStart,
+            channelEndID: thinkEnd,
+            thinkStartID: thinkStart,
+            thinkEndID: thinkEnd,
+            stopTokenIDs: [imEnd, endOfText],
+            vocabSize: 128_000)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -369,10 +423,19 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let bosMark     = "<bos>"
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
+    private static let lfmBOSMark  = "<|startoftext|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    /// LFM2's template has no thinking switch; an empty span asks for a direct
+    /// answer.
+    private static let lfmGenerationSuffix = "<|im_start|>assistant\n<think></think>"
+
+    /// The ChatML suffix that opens the assistant turn with thinking off.
+    private var chatMLNoThinkSuffix: String {
+        chatMLFamily == .lfm ? Self.lfmGenerationSuffix : Self.chatMLGenerationSuffix
+    }
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
@@ -399,7 +462,7 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     private func chatMLChatTemplate(_ messages: [Message]) throws -> String {
-        var s = ""
+        var s = chatMLFamily == .lfm ? Self.lfmBOSMark : ""
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
                 throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
@@ -410,7 +473,7 @@ public struct GFTokenizer: @unchecked Sendable {
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
-        s += Self.chatMLGenerationSuffix
+        s += chatMLNoThinkSuffix
         return s
     }
 
@@ -472,7 +535,7 @@ public struct GFTokenizer: @unchecked Sendable {
         case .chatml:
             return [endOfTurnID] + encode(
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                    + Self.chatMLGenerationSuffix,
+                    + chatMLNoThinkSuffix,
                 addBOS: false)
         }
     }

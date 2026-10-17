@@ -91,10 +91,27 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_274_845,
         reserveBytes: 1_073_741_824)
 
+    /// LiquidAI's LFM2.5-24B-A2B: 40 layers of gated short convolution and
+    /// full attention, two dense-FFN layers, then 38 routed layers of 64
+    /// experts (top-4). The download is every tensor plus tokenizer and
+    /// metadata sidecars; installed bytes add the resident index and the
+    /// 16 KB page rounding (the 5,308,416-byte expert blob is page-aligned).
+    public static let lfm25 = SupportedModelSource(
+        name: "lfm25",
+        displayName: "LFM2.5 24B-A2B 4-bit",
+        repoID: "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+        revision: "667408d494bde191c2cb9dd4f4549827816b9275",
+        sourceIndexSHA256:
+            "7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a",
+        modelID: "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+        approximateDownloadBytes: 13_585_182_789,
+        installedBytes: 13_585_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, gemma4QAT, qwen36, ornith15]
+    public static let all: [SupportedModelSource] = [gemma4, gemma4QAT, qwen36, ornith15, lfm25]
 
     public static func named(_ name: String) -> SupportedModelSource? {
         // Keep the selectors used by MLX Chat's first streamed-model release.

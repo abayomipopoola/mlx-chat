@@ -181,7 +181,8 @@ import TurboFieldfare
             #expect(streamed?.backend == .streamedMoE)
             #expect(StreamedMoERuntimeSettings.allowedContextTokens.contains(
                 streamed?.runtimeContextTokens ?? 0))
-            #expect(streamed?.ctxTokens == 262_144)
+            #expect(streamed?.ctxTokens
+                == variant.architecture.expectedArchitecture.maxPositionEmbeddings)
             #expect(streamed?.supportsVision == false)
         }
 

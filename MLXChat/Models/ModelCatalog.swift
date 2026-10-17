@@ -195,7 +195,7 @@ enum ModelCatalog {
     static let families: [ModelFamily] = [
         ModelFamily(
             id: "lfm25", name: "LFM2.5", icon: "brain.head.profile",
-            blurb: "Liquid AI's compact 2.6B reasoning model with a 128K context window.",
+            blurb: "Liquid AI's reasoning models with a 128K context window: the compact 2.6B and the 24B-A2B mixture of experts, which can also stream its experts from SSD.",
             badges: [.new, .thinking, .recommended]),
         ModelFamily(
             id: "qwen36", name: "Qwen3.6", icon: "bubble.left.and.bubble.right",
@@ -343,6 +343,19 @@ enum ModelCatalog {
             blurb: "Full-precision LFM2.5 checkpoint for maximum quality.",
             extraEOSTokens: ["<|im_end|>"],
             thinking: .thinkTags(startsInside: true, toggleable: false)),
+        CatalogModel(
+            id: StreamedMoEInstall.lfm25.sourceRepoID, displayName: "LFM2.5 24B A2B",
+            sizeGB: 13.57, ctxTokens: 131_072, quantLabel: "4-bit MoE · LiquidAI", category: .general,
+            blurb: "Mixture-of-experts LFM2.5 with about 2B active parameters. Use standard MLX or a separate low-memory SSD-streamed install.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false)),
+        CatalogModel(
+            id: StreamedMoEInstall.lfm25.modelID, displayName: "LFM2.5 24B A2B",
+            sizeGB: 13.59, ctxTokens: 131_072, quantLabel: "4-bit · SSD", category: .general,
+            blurb: "LFM2.5 MoE with a configurable context cache and SSD-streamed experts.",
+            extraEOSTokens: ["<|im_end|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: false),
+            backend: .streamedMoE),
         CatalogModel(
             id: StreamedMoEInstall.qwen36.sourceRepoID, displayName: "Qwen3.6 35B A3B",
             sizeGB: 20.4, ctxTokens: 262_144, quantLabel: "4-bit MoE", category: .general,

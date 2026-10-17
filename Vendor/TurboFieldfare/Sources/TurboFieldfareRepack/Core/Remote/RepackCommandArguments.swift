@@ -19,8 +19,8 @@ public struct RepackCommandArguments: Equatable, Sendable {
 
     public static let usage = """
     Usage:
-      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15>] --output <model.gturbo> [--overwrite] [--resume]
-      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15>] --dry-run --output <model.gturbo>
+      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>] --output <model.gturbo> [--overwrite] [--resume]
+      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>] --dry-run --output <model.gturbo>
       TurboFieldfareRepack --write-vision --model <gemma4|gemma4-qat> --text-model <text.gturbo> --output <name.vision.gturbo> [--overwrite] [--resume]
       TurboFieldfareRepack --discard-partial --output <model.gturbo>
       TurboFieldfareRepack --verify-install --input-gturbo <model.gturbo>
@@ -35,8 +35,8 @@ public struct RepackCommandArguments: Equatable, Sendable {
     Vision-write mode streams only the 358 vision tensors from a pinned Gemma
     revision into a companion directory bound to an existing text .gturbo. Pass
     --text-model for the text pack and --output for the companion
-    (Name.vision.gturbo). --model must be gemma4 or gemma4-qat; qwen36 and
-    ornith15 are rejected. Use --resume or --overwrite the same way as a text
+    (Name.vision.gturbo). --model must be gemma4 or gemma4-qat; every other
+    model is rejected. Use --resume or --overwrite the same way as a text
     install.
     """
 

@@ -6,13 +6,15 @@ import Foundation
 enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case lfm2moe = "lfm2moe"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
 /// the runtime loader at startup.
 ///
 /// `fullAttentionLayerMask` values: 0 = sliding-window attention,
-/// 1 = full attention, 2 = gated-DeltaNet linear attention.
+/// 1 = full attention, 2 = gated-DeltaNet linear attention, 3 = LFM2 gated
+/// short convolution.
 struct ArchInfo: Sendable, Equatable {
     let hiddenSize: Int
     let intermediateSize: Int          // shared expert FFN
@@ -57,6 +59,9 @@ struct ArchInfo: Sendable, Equatable {
         let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
+        }
+        if (root["model_type"] as? String) == "lfm2_moe" {
+            return try loadLFM2MoE(configPath: configPath, tc: root)
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
@@ -211,6 +216,141 @@ struct ArchInfo: Sendable, Equatable {
             linearConvKernelSize: try i("linear_conv_kernel_dim"))
         try crossCheckProductionQwen36(arch, configPath: configPath)
         return arch
+    }
+
+    // MARK: - LFM2 MoE (`model_type == "lfm2_moe"`, flat config)
+
+    /// LFM2 interleaves gated short-convolution layers (mask 3) with full
+    /// attention (mask 1). The first `num_dense_layers` layers use a dense
+    /// SwiGLU FFN (`intermediate_size`) instead of routed experts; there is no
+    /// shared expert. `linearConvKernelSize` carries `conv_L_cache`.
+    private static func loadLFM2MoE(configPath: String,
+                                    tc: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        guard let layerTypes = tc["layer_types"] as? [String] else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "missing layer_types")
+        }
+        var mask: [UInt8] = []
+        mask.reserveCapacity(layerTypes.count)
+        for t in layerTypes {
+            switch t {
+            case "conv":           mask.append(3)
+            case "full_attention": mask.append(1)
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+            }
+        }
+        let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
+        guard let theta = (rope["rope_theta"] as? Double)
+            ?? (rope["rope_theta"] as? NSNumber)?.doubleValue
+            ?? (tc["rope_theta"] as? Double)
+            ?? (tc["rope_theta"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing rope_parameters.rope_theta")
+        }
+        let hidden = try i("hidden_size")
+        let heads = try i("num_attention_heads")
+        let headDim = hidden / heads
+        let arch = ArchInfo(
+            hiddenSize: hidden,
+            intermediateSize: try i("intermediate_size"),
+            moeIntermediateSize: try i("moe_intermediate_size"),
+            numHeads: heads,
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: theta,
+            fullRopeTheta: theta,
+            partialRotaryFactor: 1.0,
+            numLayers: try i("num_hidden_layers"),
+            numExperts: try i("num_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: (tc["tie_word_embeddings"] as? Bool) ?? true,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: "silu",
+            family: .lfm2moe,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: try i("conv_L_cache"))
+        try crossCheckProductionLFM25(arch, config: tc, configPath: configPath)
+        return arch
+    }
+
+    /// Production LFM2.5-24B-A2B baseline (mirrors the runtime's
+    /// `ArchConfig.lfm25_24B_A2B`). Toy configs are exempt.
+    private static func crossCheckProductionLFM25(_ a: ArchInfo,
+                                                  config tc: [String: Any],
+                                                  configPath: String) throws {
+        guard a.hiddenSize == 2048, a.numLayers == 40 else { return }
+        var expectedMask = [UInt8](repeating: 3, count: 40)
+        for layer in [2, 6, 10, 14, 18, 22, 26, 30, 34, 38] { expectedMask[layer] = 1 }
+        let expected = ArchInfo(
+            hiddenSize: 2048,
+            intermediateSize: 11_776,
+            moeIntermediateSize: 1_536,
+            numHeads: 32,
+            numKVHeads: 8,
+            numFullKVHeads: 8,
+            headDim: 64,
+            fullHeadDim: 64,
+            vocabSize: 128_000,
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 10_000_000.0,
+            fullRopeTheta: 10_000_000.0,
+            partialRotaryFactor: 1.0,
+            numLayers: 40,
+            numExperts: 64,
+            topKExperts: 4,
+            tieWordEmbeddings: true,
+            attentionKEqV: false,
+            fullAttentionLayerMask: expectedMask,
+            hiddenActivation: "silu",
+            family: .lfm2moe,
+            attnOutputGate: false,
+            attentionScale: 0.125,
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 3)
+        let denseLayers = (tc["num_dense_layers"] as? Int) ?? (tc["num_dense_layers"] as? NSNumber)?.intValue
+        let useBias = (tc["use_expert_bias"] as? Bool) ?? false
+        let normTopK = (tc["norm_topk_prob"] as? Bool) ?? false
+        let convBias = (tc["conv_bias"] as? Bool) ?? false
+        let scaling = (tc["routed_scaling_factor"] as? Double)
+            ?? (tc["routed_scaling_factor"] as? NSNumber)?.doubleValue ?? 1.0
+        guard a == expected, denseLayers == 2, useBias, normTopK, !convBias, scaling == 1.0 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "lfm2_moe config does not match the pinned "
+                    + "LFM2.5-24B-A2B architecture baseline")
+        }
     }
 
     /// Production Qwen3.6-35B-A3B baseline (mirrors the runtime's

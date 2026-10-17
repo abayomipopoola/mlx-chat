@@ -213,7 +213,10 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
-        if name.hasPrefix("language_model.") {
+        // LFM2's MLX conversion keeps the text model at the root (`model.*`)
+        // rather than under `language_model.`.
+        let languageModelPrefix = family == .lfm2moe ? "model." : "language_model."
+        if name.hasPrefix(languageModelPrefix) {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
                let layer = layerIndex(in: name),
@@ -234,6 +237,7 @@ enum RepackPlanner {
         switch family {
         case .gemma4: routedContainer = ".experts.switch_glu."
         case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .lfm2moe: routedContainer = ".feed_forward.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -307,6 +311,26 @@ enum RepackPlanner {
         layerPlans.reserveCapacity(arch.numLayers)
         for layer in 0..<arch.numLayers {
             let bundle = routedByLayerAndRole[layer] ?? [:]
+            // LFM2's leading dense-FFN layers own no experts. Only routed
+            // layers are packed, numbered in order; the runtime maps model
+            // layer L to packed layer L - numDenseLayers.
+            if arch.family == .lfm2moe {
+                if bundle.isEmpty { continue }
+                guard let gName = bundle["gate"], let uName = bundle["up"],
+                      let dName = bundle["down"] else {
+                    throw RepackError.configurationInvalid(detail:
+                        "layer \(layer) routed-expert bundle incomplete: \(bundle)")
+                }
+                let packed = layerPlans.count
+                let path = (layersDir as NSString)
+                    .appendingPathComponent("layer_\(String(format: "%02d", packed)).bin")
+                layerPlans.append(try planLayerFile(path: path, layer: packed,
+                                                    gateName: gName, upName: uName,
+                                                    downName: dName,
+                                                    registry: registry, meta: meta,
+                                                    arch: arch))
+                continue
+            }
             // Synthetic snapshots may legitimately have no routed experts.
             guard let gName = bundle["gate"], let uName = bundle["up"], let dName = bundle["down"] else {
                 if bundle.isEmpty {
@@ -537,12 +561,13 @@ enum RepackPlanner {
         return out
     }
 
-    /// Logical shape of a packed quantized tensor whose source is `[D0,..,Dn-1, Dn/factor]`.
+    /// Logical shape of a packed quantized tensor whose source last axis holds
+    /// `Dn * bits / 32` words. Multiply before dividing: 6-bit packs 16 values
+    /// into 3 words, so `32 / bits` is not an integer factor.
     private static func logicalShape(forPackedSource source: [UInt64], bits: Int) -> [UInt64] {
-        let factor = UInt64(32 / bits)
         guard !source.isEmpty else { return source }
         var out = source
-        out[out.count - 1] = source[source.count - 1] * factor
+        out[out.count - 1] = source[source.count - 1] * 32 / UInt64(bits)
         return out
     }
 
@@ -554,13 +579,16 @@ enum RepackPlanner {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
         func key(_ n: String) -> (Int, Int, Int, String) {
             if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
+            if n == "model.embed_tokens.weight"                 { return (0, 0, 0, n) }
             if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
+            if n == "model.embedding_norm.weight"               { return (3, 0, 0, n) }
             if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
             if let li = layerIndex(in: n) {
                 let slot: Int
                 switch family {
                 case .gemma4: slot = slotRank(in: n)
                 case .qwen36: slot = qwenSlotRank(in: n)
+                case .lfm2moe: slot = lfmSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -601,6 +629,28 @@ enum RepackPlanner {
         if n.contains(".mlp.shared_expert.down_proj.weight") { return 19 }
         if n.hasSuffix(".input_layernorm.weight")        { return 20 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 21 }
+        return 100
+    }
+
+    /// Within-layer slot order for LFM2 MoE: the short-conv or attention
+    /// operator, its norms, then the router or dense FFN, then the layer norms.
+    private static func lfmSlotRank(in n: String) -> Int {
+        if n.contains(".conv.in_proj.weight")            { return 0 }
+        if n.contains(".conv.conv.weight")               { return 1 }
+        if n.contains(".conv.out_proj.weight")           { return 2 }
+        if n.contains(".self_attn.q_proj.weight")        { return 3 }
+        if n.contains(".self_attn.k_proj.weight")        { return 4 }
+        if n.contains(".self_attn.v_proj.weight")        { return 5 }
+        if n.contains(".self_attn.out_proj.weight")      { return 6 }
+        if n.contains(".self_attn.q_layernorm.weight")   { return 7 }
+        if n.contains(".self_attn.k_layernorm.weight")   { return 8 }
+        if n.contains(".feed_forward.gate.weight")       { return 9 }
+        if n.hasSuffix(".feed_forward.expert_bias")      { return 10 }
+        if n.contains(".feed_forward.gate_proj.weight")  { return 11 }
+        if n.contains(".feed_forward.up_proj.weight")    { return 12 }
+        if n.contains(".feed_forward.down_proj.weight")  { return 13 }
+        if n.hasSuffix(".operator_norm.weight")          { return 14 }
+        if n.hasSuffix(".ffn_norm.weight")               { return 15 }
         return 100
     }
 

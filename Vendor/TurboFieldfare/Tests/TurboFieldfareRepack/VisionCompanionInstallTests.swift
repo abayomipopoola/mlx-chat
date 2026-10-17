@@ -11,7 +11,7 @@ final class VisionCompanionInstallTests: XCTestCase {
         XCTAssertTrue(usage.contains("--model <gemma4|gemma4-qat>"))
         XCTAssertTrue(usage.contains("[--overwrite] [--resume]"))
         XCTAssertTrue(usage.contains("Vision-write mode"))
-        XCTAssertTrue(usage.contains("--model <gemma4|gemma4-qat|qwen36|ornith15>"))
+        XCTAssertTrue(usage.contains("--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>"))
     }
 
     func testWriteVisionParseRequiresGemmaAndTextModel() throws {
@@ -48,8 +48,8 @@ final class VisionCompanionInstallTests: XCTestCase {
         }
     }
 
-    func testDefaultTextInstallStillAcceptsAllFourModels() throws {
-        for name in ["gemma4", "gemma4-qat", "qwen36", "ornith15"] {
+    func testDefaultTextInstallAcceptsEverySupportedModel() throws {
+        for name in ["gemma4", "gemma4-qat", "qwen36", "ornith15", "lfm25"] {
             let parsed = try RepackCommandArguments.parse([
                 "TurboFieldfareRepack",
                 "--model", name,

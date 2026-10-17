@@ -570,8 +570,14 @@ public final class RemoteStreamingRepacker {
             router: 8,
             sharedExpert: 8,
             routedExpert: 4)
+        if plan.arch.family == .lfm2moe {
+            // The LFM2 router is an unquantized float32 matrix; 32 marks it so.
+            bits.router = 32
+        }
         for e in plan.resident.entries {
-            if e.name == "language_model.model.embed_tokens.weight", let s = e.quantSpec {
+            if e.name == "language_model.model.embed_tokens.weight"
+                || e.name == "model.embed_tokens.weight",
+               let s = e.quantSpec {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
@@ -585,7 +591,8 @@ public final class RemoteStreamingRepacker {
                 bits.router = s.bits
             }
             if e.name.hasSuffix(".mlp.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight"),
+                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
+                || e.name.hasSuffix(".feed_forward.gate_proj.weight"),
                let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }
@@ -603,7 +610,7 @@ public final class RemoteStreamingRepacker {
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,
             files: files,
             expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
-            numLayers: plan.arch.numLayers,
+            numLayers: plan.layers.count,
             expertStride: expertStride,
             bitWidths: bits)
         let tmp = (partialDir as NSString).appendingPathComponent("manifest.json.tmp")

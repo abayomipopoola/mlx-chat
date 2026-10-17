@@ -302,7 +302,7 @@ public enum ManifestReader {
         }
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
-            try validateQuant(quant)
+            try validateQuant(quant, family: expected.family)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
@@ -335,12 +335,15 @@ public enum ManifestReader {
         return false
     }
 
-    private static func validateQuant(_ quant: ManifestQuant) throws {
+    private static func validateQuant(_ quant: ManifestQuant, family: ModelFamily) throws {
+        // LFM2 keeps a 6-bit embedding (also its lm_head) and an unquantized
+        // float32 router, which the writer records as 32 bits.
+        let lfm = family == .lfm2moe
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4]),
+            ("embedding", quant.embedding, lfm ? [6] : [4]),
             ("attention", quant.attention, [4]),
-            ("router", quant.router, [8]),
-            ("sharedExpert", quant.sharedExpert, [4, 8]),
+            ("router", quant.router, lfm ? [32] : [8]),
+            ("sharedExpert", quant.sharedExpert, lfm ? [4] : [4, 8]),
             ("routedExpert", quant.routedExpert, [4]),
         ]
         for (name, slot, allowedBits) in slots {

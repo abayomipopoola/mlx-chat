@@ -74,6 +74,12 @@ public final class KVCacheManager {
                 fp16RingCapacityOverride: Int? = nil) throws {
         precondition(maxContext > 0, "maxContext must be positive")
         precondition(maxPrefillChunkTokens > 0, "maxPrefillChunkTokens must be positive")
+        // Refused before a single `makeBuffer`: a context past the checkpoint's
+        // position ceiling has no valid RoPE positions.
+        guard maxContext <= config.maxPositionEmbeddings else {
+            throw ModelError.contextExceedsModel(requested: maxContext,
+                                                 maximum: config.maxPositionEmbeddings)
+        }
         self.config = config
         self.maxContext = maxContext
         let ringEnabled = fp16RingEnabled
@@ -128,13 +134,13 @@ public final class KVCacheManager {
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
-                throw ModelError.residentBufferWrapFailed
+                throw ModelError.kvAllocationFailed(layer: layer, bytes: length)
             }
             kBuf.label = "kv.K.layer\(layer)"
             ks.append(kBuf)
 
             guard let vBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
-                throw ModelError.residentBufferWrapFailed
+                throw ModelError.kvAllocationFailed(layer: layer, bytes: length)
             }
             vBuf.label = "kv.V.layer\(layer)"
             vs.append(vBuf)

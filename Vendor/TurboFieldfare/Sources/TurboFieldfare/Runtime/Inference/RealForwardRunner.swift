@@ -1741,12 +1741,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 waitUntilCompleted(pending.cb)
             }
             if let sharedCB = pending.sharedCB {
-                try checkCommandBufferError(sharedCB.error)
+                try checkCommandBufferError(sharedCB)
             }
             if let phase1HitCB = pending.phase1HitCB {
-                try checkCommandBufferError(phase1HitCB.error)
+                try checkCommandBufferError(phase1HitCB)
             }
-            try checkCommandBufferError(pending.cb.error)
+            try checkCommandBufferError(pending.cb)
             totalCb2Nanos &+= pending.encodeAndCommitNanos
         }
 
@@ -1953,7 +1953,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
-            try checkCommandBufferError(cb.error)
+            try checkCommandBufferError(cb)
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
 
             // CPU readback to fetch routed-expert blobs from disk.
@@ -2422,7 +2422,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) throws {
         waitUntilCompleted(cb)
-        try checkCommandBufferError(cb.error)
+        try checkCommandBufferError(cb)
     }
 
     private nonisolated func waitUntilCompleted(_ cb: MTLCommandBuffer) {

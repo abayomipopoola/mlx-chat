@@ -44,7 +44,7 @@ import TurboFieldfare
     }
 
     @Test func ssdOptionIsAvailableForAllPinnedMoESources() {
-        #expect(StreamedMoEInstall.variants.count == 4)
+        #expect(StreamedMoEInstall.variants.count == 5)
         for variant in StreamedMoEInstall.variants {
             #expect(StreamedMoEInstall.supportsSSDStreaming(
                 sourceModelID: variant.sourceRepoID))
@@ -68,6 +68,13 @@ import TurboFieldfare
             == "Ornith-1.5-35B-A3B.gturbo")
         #expect(StreamedMoEInstall.ornith15.architecture == .qwen36)
         #expect(StreamedMoEInstall.ornith15.helperModelArgument == "ornith15")
+        #expect(StreamedMoEInstall.lfm25.managedDirectory.lastPathComponent
+            == "LFM2.5-24B-A2B.gturbo")
+        #expect(StreamedMoEInstall.lfm25.architecture == .lfm2moe)
+        #expect(StreamedMoEInstall.lfm25.helperModelArgument == "lfm25")
+        #expect(!StreamedMoEInstall.lfm25.architecture.thinkingIsOptional)
+        #expect(!StreamedMoEInstall.supportsSSDStreaming(
+            sourceModelID: "LiquidAI/LFM2.5-2.6B-MLX"))
         #expect(ModelDownloadMode.defaultMode == .mlx)
         #expect(ModelDownloadMode.availableModes(
             for: "mlx-community/gemma-4-12B-it-4bit") == [.mlx])
@@ -266,7 +273,7 @@ import TurboFieldfare
             decoding: output.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self)
         #expect(process.terminationStatus == 0)
-        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15>"))
+        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>"))
         #expect(text.contains("--dry-run"))
         #expect(text.contains("--write-vision"))
         #expect(text.contains("--text-model <text.gturbo>"))
@@ -347,6 +354,22 @@ import TurboFieldfare
             <think>
             """ + "\n")
         #expect(!prompt.hasSuffix("</think>"))
+    }
+
+    @Test func lfmThinkingPromptStartsWithBOSAndMatchesLFMGenerationPrompt() {
+        let prompt = StreamedMoEPrompt.renderChatMLThinkingPrompt(
+            history: [EngineMessage(role: .user, text: " Hi ")],
+            systemPrompt: "Be brief.",
+            family: .lfm)
+
+        #expect(prompt == """
+            <|startoftext|><|im_start|>system
+            Be brief.<|im_end|>
+            <|im_start|>user
+            Hi<|im_end|>
+            <|im_start|>assistant
+            <think>
+            """)
     }
 
     @Test func strippedChannelEndTokenStillSeparatesThoughtFromAnswer() {

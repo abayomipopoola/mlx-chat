@@ -8,6 +8,7 @@ import Metal
 public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case lfm2moe = "lfm2moe"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -44,7 +45,8 @@ public struct LinearAttentionConfig: Sendable, Equatable {
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
 /// `fullAttentionLayerMask` values: 0 = sliding-window attention,
-/// 1 = full attention, 2 = gated-DeltaNet linear attention.
+/// 1 = full attention, 2 = gated-DeltaNet linear attention, 3 = LFM2 gated
+/// short convolution.
 public struct ArchConfig: Sendable, Equatable {
     public let hiddenSize: Int
     public let intermediateSize: Int          // shared expert FFN (== ffnIntermediate in manifest)
@@ -93,8 +95,16 @@ public struct ArchConfig: Sendable, Equatable {
     /// sub-dim): rotation confined to the first `rotaryDim` elements, pairing
     /// (i, rotaryDim/2 + i), frequency divisor = rotaryDim.
     public let ropeNeoxSubdim: Bool
-    /// Gated-DeltaNet dimensions for layers with mask value 2.
+    /// Gated-DeltaNet dimensions for layers with mask value 2. For LFM2,
+    /// `convKernelSize` carries the short-convolution `conv_L_cache`.
     public let linearAttention: LinearAttentionConfig
+    /// Leading layers that run a dense FFN of `intermediateSize` instead of
+    /// routed experts (LFM2). Their experts are not packed, so model layer L
+    /// streams from packed layer `L - numDenseLayers`.
+    public let numDenseLayers: Int
+    /// The checkpoint's `max_position_embeddings`. Not a manifest-compared
+    /// field, so `ManifestReader.validateArch` does not read it.
+    public let maxPositionEmbeddings: Int
 
     public init(
         hiddenSize: Int,
@@ -126,7 +136,9 @@ public struct ArchConfig: Sendable, Equatable {
         ffnSandwichNorms: Bool = true,
         sharedExpertGated: Bool = false,
         ropeNeoxSubdim: Bool = false,
-        linearAttention: LinearAttentionConfig = .none
+        linearAttention: LinearAttentionConfig = .none,
+        numDenseLayers: Int = 0,
+        maxPositionEmbeddings: Int = 262_144
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -158,6 +170,8 @@ public struct ArchConfig: Sendable, Equatable {
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
+        self.numDenseLayers = numDenseLayers
+        self.maxPositionEmbeddings = maxPositionEmbeddings
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -245,10 +259,64 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical LFM2.5-24B-A2B baseline: 40 layers of gated short
+    /// convolution (mask 3) with full attention every fourth layer from layer
+    /// 2, two dense SwiGLU layers, then 64 routed experts (top-4, sigmoid
+    /// router with a selection bias, no shared expert). The 6-bit embedding
+    /// table doubles as the lm_head.
+    ///
+    /// `intermediateSize` is the dense-layer FFN width. The sliding-window
+    /// slots mirror the full-attention values and are never used to size
+    /// storage.
+    public static let lfm25_24B_A2B = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 11_776,
+        moeIntermediateSize: 1_536,
+        numHeads: 32,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 64,
+        fullHeadDim: 64,
+        vocabSize: 128_000,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 1.0,
+        numLayers: 40,
+        numExperts: 64,
+        topKExperts: 4,
+        tieWordEmbeddings: true,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.lfm25LayerMask(),
+        hiddenActivation: "silu",
+        family: .lfm2moe,
+        attnOutputGate: false,
+        attentionScale: 0.125,   // 64^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 0, numVHeads: 0,
+            keyHeadDim: 0, valueHeadDim: 0,
+            convKernelSize: 3),
+        numDenseLayers: 2,
+        maxPositionEmbeddings: 131_072
+    )
+
+    private static func lfm25LayerMask() -> [UInt8] {
+        var mask = [UInt8](repeating: 3, count: 40)
+        for i in stride(from: 2, to: 40, by: 4) { mask[i] = 1 }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
+        .lfm2moe: .lfm25_24B_A2B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -286,6 +354,8 @@ public struct ArchConfig: Sendable, Equatable {
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
+    public func layerIsShortConv(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 3 }
+    public func layerIsDenseFFN(_ layer: Int) -> Bool { layer < numDenseLayers }
 }
 
 /// Failure modes for the validation gates in `Model.load`.
@@ -304,6 +374,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case indexCorrupt(detail: String)
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
+    case contextExceedsModel(requested: Int, maximum: Int)
+    case kvAllocationFailed(layer: Int, bytes: Int)
 
     public var description: String {
         switch self {
@@ -335,6 +407,10 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "\(c) failed with errno \(e)"
         case .trustedReceiptInvalid(let detail):
             return "trusted install receipt invalid: \(detail)"
+        case .contextExceedsModel(let requested, let maximum):
+            return "maxContext \(requested) exceeds the model's maximum position \(maximum)"
+        case .kvAllocationFailed(let layer, let bytes):
+            return "KV cache allocation of \(bytes) bytes for layer \(layer) failed"
         }
     }
 }

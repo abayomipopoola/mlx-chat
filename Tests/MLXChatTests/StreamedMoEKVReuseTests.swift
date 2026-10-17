@@ -19,6 +19,37 @@ import TurboFieldfare
         #expect(start == .reset)
     }
 
+    @Test func rewindableRunnerResumesAtTheLongestSharedPrefix() {
+        // The cached turn ended in a thought the next prompt no longer
+        // carries: [1, 2, 3] is shared, the cached 4 diverges.
+        let nextPrompt: [Int32] = [1, 2, 3, 9, 10]
+        let start = StreamedMoEKVReusePolicy.start(
+            newPromptIDs: nextPrompt,
+            cache: makeCache(kvTokenIDs: cachedIDs),
+            conversationID: conversationA,
+            systemPrompt: "Be concise.",
+            thinkingEnabled: true,
+            allowsRewind: true)
+        #expect(start == .resume(cachedPromptTokens: 3))
+        #expect(StreamedMoEKVReusePolicy.start(
+            newPromptIDs: nextPrompt,
+            cache: makeCache(kvTokenIDs: cachedIDs),
+            conversationID: conversationA,
+            systemPrompt: "Be concise.",
+            thinkingEnabled: true) == .reset)
+    }
+
+    @Test func rewindableRunnerResetsWhenNothingIsShared() {
+        let start = StreamedMoEKVReusePolicy.start(
+            newPromptIDs: [7, 8, 9],
+            cache: makeCache(kvTokenIDs: cachedIDs),
+            conversationID: conversationA,
+            systemPrompt: "Be concise.",
+            thinkingEnabled: true,
+            allowsRewind: true)
+        #expect(start == .reset)
+    }
+
     @Test func trimmedHistoryThatIsNotAPrefixResets() {
         // PromptBuilder.trimmed drops oldest pairs, so the new IDs are a
         // suffix of the old conversation, not a prefix of the cached KV.

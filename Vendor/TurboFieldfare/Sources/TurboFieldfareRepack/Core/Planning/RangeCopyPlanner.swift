@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 public struct RangeCopy: Sendable, Equatable {
     public let shardID: String
@@ -44,6 +45,43 @@ public struct RangeCopyPlan: Sendable {
 }
 
 public enum RangeCopyPlanner {
+    static func plan(vision plan: VisionPackPlan,
+                     weightsPath: String,
+                     rangeChunkBytes: Int) throws -> RangeCopyPlan {
+        let copies = plan.entries.map { entry in
+            RangeCopy(shardID: entry.source.shardPath,
+                      sourceOffset: entry.source.absoluteOffset,
+                      size: entry.source.sizeBytes,
+                      destinationPath: weightsPath,
+                      destinationOffset: entry.fileOffset)
+        }
+        let outputRoot = (weightsPath as NSString).deletingLastPathComponent
+        try validateDestinationIntervals(copies, outputRoot: outputRoot)
+        let coalesced = try coalesce(copies: copies, rangeChunkBytes: rangeChunkBytes)
+        let expectedOutputs = [
+            RemoteExpectedOutput(relativePath: GTurboVisionFormatV1.weightsFile,
+                                 size: plan.weightsFileSize)
+        ]
+        let identity = visionPlanIdentity(plan)
+        let fingerprint = try canonicalFingerprint(
+            copies: coalesced,
+            outputRoot: outputRoot,
+            rangeChunkBytes: rangeChunkBytes,
+            layoutMode: "vision-companion",
+            layoutOrderSha256: nil,
+            residentIndexSha256: identity,
+            expectedOutputs: expectedOutputs)
+        let downloaded = coalesced.reduce(UInt64(0)) { $0 + $1.size }
+        let copied = copies.reduce(UInt64(0)) { $0 + $1.size }
+        return RangeCopyPlan(scalarCopies: copies,
+                             coalescedCopies: coalesced,
+                             remoteBytesToDownload: downloaded,
+                             remoteGapBytesDownloaded: downloaded - copied,
+                             canonicalFingerprint: fingerprint,
+                             residentIndexSha256: identity,
+                             expectedOutputs: expectedOutputs)
+    }
+
     static func plan(repackPlan: RepackPlan,
                      rangeChunkBytes: Int,
                      layoutMode: String = "identity",
@@ -296,6 +334,22 @@ public enum RangeCopyPlanner {
                 detail: "invalid relative destination path \(relative)")
         }
         return relative
+    }
+
+    private static func visionPlanIdentity(_ plan: VisionPackPlan) -> String {
+        var writer = FingerprintWriter(domain: "TurboFieldfare.VisionCompanionPlan.v1")
+        writer.append(UInt64(plan.entries.count))
+        writer.append(plan.sourcePayloadBytes)
+        writer.append(plan.weightsFileSize)
+        for entry in plan.entries {
+            writer.append(entry.source.name)
+            writer.append(entry.source.shardPath.precomposedStringWithCanonicalMapping)
+            writer.append(entry.source.absoluteOffset)
+            writer.append(entry.source.sizeBytes)
+            writer.append(entry.fileOffset)
+            writer.append(UInt64(entry.executionPosition))
+        }
+        return writer.finalize()
     }
 
     private static func destinationOrder(_ lhs: RangeCopy, _ rhs: RangeCopy) -> Bool {

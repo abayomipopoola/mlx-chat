@@ -1,5 +1,5 @@
 import Testing
-import TurboFieldfare
+@testable import TurboFieldfare
 
 /// Guards the streaming emit cursor.
 ///
@@ -65,5 +65,71 @@ import TurboFieldfare
         #expect(GFEmitCursor.holdingTrailingReplacements("ok\u{FFFD}\u{FFFD}") == "ok")
         #expect(GFEmitCursor.holdingTrailingReplacements("o\u{FFFD}k") == "o\u{FFFD}k")
         #expect(GFEmitCursor.holdingTrailingReplacements("").isEmpty)
+    }
+}
+
+@Suite struct IncrementalDecodeHoldbackTests {
+    @Test func testByteFallbackRunHoldsIncompleteCodepoint() {
+        var run = ByteFallbackRun()
+        #expect(run.push(0xE2) == "")
+        #expect(run.push(0x87) == "")
+        #expect(run.push(0x94) == "")
+        #expect(run.commit() == "⇔")
+    }
+
+    @Test func testPartialByteBufferHoldsOrnithSplitCodepoint() {
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushBytes([0xE2]) == "")
+        #expect(buffer.pushBytes([0x87]) == "")
+        #expect(buffer.pushBytes([0x94]) == "⇔")
+        #expect(buffer.flush().isEmpty)
+    }
+
+    @Test func testPartialByteBufferFlushDropsIncompleteTail() {
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushText("done ") == "done ")
+        #expect(buffer.pushBytes([0xE2]) == "")
+        #expect(buffer.flush() == "")
+    }
+
+    @Test func testGemmaPushTextKeepsAccentedPiece() {
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushText(GemmaDecoding.fragment("▁caf")) == " caf")
+        #expect(buffer.pushText("é") == "é")
+        #expect(buffer.flush().isEmpty)
+    }
+
+    @Test func testGemmaDecodingDoesNotRescanTokenLists() {
+        #expect(GemmaDecoding.isByteFallback("<0xE2>"))
+        #expect(GemmaDecoding.byteValue("<0xE2>") == 0xE2)
+        #expect(GemmaDecoding.fragment("▁Hello") == " Hello")
+        #expect(!GemmaDecoding.isByteFallback("⇔"))
+    }
+
+    @Test func testByteLevelBPEMapsWholeTokenGtheToSpaceThe() {
+        #expect(ByteLevelBPE.rawBytes(from: "Ġthe") == Array(" the".utf8))
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushByteLevelToken("Ġthe") == " the")
+        #expect(buffer.flush().isEmpty)
+    }
+
+    @Test func testByteLevelBPEMapsChatMLEncodedEAcute() {
+        // GPT-2 spelling of UTF-8 C3 A9 (é) is U+00C3 U+00A9, not "Ã" + "é".
+        let spelling = "\u{00C3}\u{00A9}"
+        #expect(ByteLevelBPE.rawBytes(from: spelling) == [0xC3, 0xA9])
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushByteLevelToken(spelling) == "é")
+    }
+
+    @Test func testByteLevelWholeTokenStillHoldsSplitCodepoint() {
+        func gpt2Spelling(_ byte: UInt8) -> String {
+            let scalarValue = ByteLevelBPE.unicodeToByte.first { $0.value == byte }!.key
+            return String(Unicode.Scalar(scalarValue)!)
+        }
+        var buffer = PartialByteBuffer()
+        #expect(buffer.pushByteLevelToken(gpt2Spelling(0xE2)) == "")
+        #expect(buffer.pushByteLevelToken(gpt2Spelling(0x87)) == "")
+        #expect(buffer.pushByteLevelToken(gpt2Spelling(0x94)) == "⇔")
+        #expect(buffer.flush().isEmpty)
     }
 }

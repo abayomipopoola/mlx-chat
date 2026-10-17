@@ -62,6 +62,19 @@ final class MLXEngine: ChatEngine {
         }
         let configuration = ModelConfiguration(
             directory: localDirectory, extraEOSTokens: capabilities.extraEOSTokens)
+        let configData = try? Data(contentsOf: localDirectory.appendingPathComponent("config.json"))
+        let prismPolicy: HadamardQuantizedCheckpointPolicy?
+        if let configData, PrismHadamardQwen35.isPrismConfig(configData) {
+            do {
+                prismPolicy = try PrismHadamardQwen35.policy(configJSON: configData)
+            } catch {
+                throw EngineError.generationFailed(
+                    "Couldn't load the model: \(error.localizedDescription)")
+            }
+            await PrismHadamardQwen35.register()
+        } else {
+            prismPolicy = nil
+        }
 
         do {
             // Route mlx C-level errors (e.g. affine quantize rejection) into
@@ -80,6 +93,11 @@ final class MLXEngine: ChatEngine {
                         using: #huggingFaceTokenizerLoader(),
                         configuration: configuration,
                         progressHandler: { progress($0.fractionCompleted) })
+                }
+            }
+            if let prismPolicy {
+                try await loaded.perform { context in
+                    try prismPolicy.prepareLoaded(context.model)
                 }
             }
             // Unloaded (model switch) while we were loading: drop the weights

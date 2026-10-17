@@ -3,7 +3,6 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(ChatController.self) private var chat
-    @Environment(UpdateController.self) private var updates
     @Binding var selectedConversationID: UUID?
     /// Pushes the in-frame Settings page onto the detail column.
     let onOpenSettings: () -> Void
@@ -72,29 +71,6 @@ struct SidebarView: View {
                     .allowsHitTesting(false)
             }
 
-            if let version = updates.availableVersion {
-                HStack {
-                    Spacer()
-                    Button {
-                        updates.checkForUpdates()
-                    } label: {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.brandGreen))
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Install MLX Chat \(version)")
-                    .accessibilityLabel("Install MLX Chat \(version)")
-                    .accessibilityIdentifier("installUpdateButton")
-                }
-                .padding(.horizontal, Studio.sidebarInset)
-                .padding(.top, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
             // Outside the conversation ScrollView so history cannot slide over it.
             SidebarChromeButton(
                 title: "Settings",
@@ -107,7 +83,6 @@ struct SidebarView: View {
             .padding(.top, Studio.sidebarSettingsTop)
             .padding(.bottom, 8)
         }
-        .animation(.easeOut(duration: 0.2), value: updates.availableVersion)
         .background(Color.sidebarBackground)
         .alert("Rename Chat", isPresented: Binding(
             get: { renameTarget != nil },

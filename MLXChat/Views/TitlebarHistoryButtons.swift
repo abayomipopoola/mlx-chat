@@ -80,9 +80,35 @@ struct TitlebarWindowCluster: View {
         HStack(spacing: Studio.titlebarToggleToHistory) {
             SidebarToggleButton()
             TitlebarHistoryButtons(navigation: navigation)
+            TitlebarUpdatePill()
         }
         .padding(.leading, Studio.trafficLightClearance)
         .padding(.top, Studio.titlebarClusterTop)
+    }
+}
+
+/// Compact install capsule, half the title-bar icon size, shown only when
+/// Sparkle reports a ready update.
+struct TitlebarUpdatePill: View {
+    @Environment(UpdateController.self) private var updates
+
+    var body: some View {
+        if let version = updates.availableVersion {
+            Button {
+                updates.checkForUpdates()
+            } label: {
+                Image(systemName: "arrow.down.to.line")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 14)
+                    .background(Capsule().fill(Color.sendGreen))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Install MLX Chat \(version)")
+            .accessibilityLabel("Install MLX Chat \(version)")
+            .accessibilityIdentifier("installUpdateButton")
+        }
     }
 }
 

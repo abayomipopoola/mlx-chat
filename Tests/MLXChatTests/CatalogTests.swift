@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import MLXChat
 
 /// Contract: catalog integrity — ids are unique, the default engine needs no
@@ -49,6 +50,35 @@ import Testing
 
         #expect(upgraded.supportsThinkingToggle)
         #expect(upgraded.thinking?.startsInside == true)
+    }
+
+    @Test func bonsai2EntriesAreTernaryVisionModelsWithQwenThinking() {
+        for id in [
+            "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit",
+            "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        ] {
+            let model = ModelCatalog.model(for: id)
+            #expect(model?.backend == .mlx)
+            #expect(model?.supportsVision == true)
+            #expect(model?.supportsThinkingToggle == true)
+            #expect(model?.thinking?.startsInside == true)
+            #expect(model?.ctxTokens == 262_144)
+            #expect(model?.extraEOSTokens.isSuperset(of: ["<|im_end|>", "<|endoftext|>"]) == true)
+            #expect(model.map { ModelCatalog.familyID(for: $0) } == "bonsai")
+        }
+        #expect(ModelCatalog.family(for: "bonsai") != nil)
+    }
+
+    @Test func importedPrismHadamardPackGetsQwenThinkingAndLongContext() {
+        let config = Data(#"{"model_type":"prism_hadamard_qwen35","vision_config":{}}"#.utf8)
+        let model = ModelCatalog.importedModel(
+            repoID: "someone/Ternary-Bonsai-2-4B-mlx-2bit", supportsVision: true,
+            configJSON: config)
+
+        #expect(model.supportsThinkingToggle)
+        #expect(model.thinking?.startsInside == true)
+        #expect(model.ctxTokens == 262_144)
+        #expect(model.extraEOSTokens.isSuperset(of: ["<|im_end|>", "<|endoftext|>"]))
     }
 
     @Test func ornithImportedModelUsesQwenThinkingProtocol() {
@@ -262,5 +292,72 @@ import Testing
         #expect(decoded.sourceSubfolder == "5bit")
         #expect(decoded.sourceRepoID == "LiquidAI/LFM2.5-2.6B-MLX")
         #expect(decoded.hugginFaceURL.absoluteString.hasSuffix("/tree/main/5bit"))
+    }
+
+    @Test func gemmaSSDReportsVisionOnlyWhenCompanionPackIsPresent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-vision-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let text = root.appendingPathComponent("Gemma4-26B-A4B.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: text, withIntermediateDirectories: true)
+        let gemma = ModelCatalog.model(for: StreamedMoEInstall.standard.modelID)!
+        #expect(gemma.supportsVision == false)
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: gemma, directory: text)
+                .supportsVision == false)
+
+        let companion = try VisionPackLocation.companionURL(forTextModel: text)
+        try FileManager.default.createDirectory(at: companion, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: companion.appendingPathComponent("manifest.json"))
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: gemma, directory: text)
+                .supportsVision == true)
+
+        let qwen = ModelCatalog.model(for: StreamedMoEInstall.qwen36.modelID)!
+        let qwenDir = root.appendingPathComponent(
+            "Qwen3.6-35B-A3B.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: qwenDir, withIntermediateDirectories: true)
+        let qwenCompanion = try VisionPackLocation.companionURL(forTextModel: qwenDir)
+        try FileManager.default.createDirectory(
+            at: qwenCompanion, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: qwenCompanion.appendingPathComponent("manifest.json"))
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: qwen, directory: qwenDir)
+                .supportsVision == false)
+        #expect(qwen.supportsVision == false)
+
+        let qatText = root.appendingPathComponent(
+            "Gemma4-26B-A4B-QAT.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: qatText, withIntermediateDirectories: true)
+        let qat = ModelCatalog.model(for: StreamedMoEInstall.qat.modelID)!
+        #expect(qat.supportsVision == false)
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: qat, directory: qatText)
+                .supportsVision == false)
+        let qatCompanion = try VisionPackLocation.companionURL(forTextModel: qatText)
+        #expect(qatCompanion.lastPathComponent == "Gemma4-26B-A4B-QAT.vision.gturbo")
+        try FileManager.default.createDirectory(
+            at: qatCompanion, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: qatCompanion.appendingPathComponent("manifest.json"))
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: qat, directory: qatText)
+                .supportsVision == true)
+
+        let ornith = ModelCatalog.model(for: StreamedMoEInstall.ornith15.modelID)!
+        let ornithDir = root.appendingPathComponent(
+            "Ornith-1.5-35B-A3B.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: ornithDir, withIntermediateDirectories: true)
+        let ornithCompanion = try VisionPackLocation.companionURL(forTextModel: ornithDir)
+        try FileManager.default.createDirectory(
+            at: ornithCompanion, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: ornithCompanion.appendingPathComponent("manifest.json"))
+        #expect(
+            StreamedMoEInstall.applyingVisionPackPresence(to: ornith, directory: ornithDir)
+                .supportsVision == false)
+        #expect(ornith.supportsVision == false)
     }
 }

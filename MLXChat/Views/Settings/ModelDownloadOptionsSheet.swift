@@ -55,6 +55,7 @@ struct ModelDownloadOptionsSheet: View {
     }
 
     private var streamedStatusTitle: String {
+        if gemmaVisionCompanionMissing { return "Vision pack needed" }
         if isSSDReady { return "Ready to use" }
         switch managedSSDInstallState {
         case .complete: return "Install found"
@@ -72,7 +73,19 @@ struct ModelDownloadOptionsSheet: View {
         }
     }
 
+    private var gemmaVisionCompanionMissing: Bool {
+        guard let streamedVariant, streamedVariant.architecture == .gemma4 else {
+            return false
+        }
+        return (isSSDReady || managedSSDInstallState == .complete)
+            && !StreamedMoEInstall.visionCompanionLooksPresent(
+                beside: streamedVariant.managedDirectory)
+    }
+
     private var ssdPrimaryActionTitle: String {
+        if gemmaVisionCompanionMissing {
+            return "Download vision pack"
+        }
         if isSSDReady || managedSSDInstallState == .complete {
             return "Use SSD Model"
         }
@@ -257,6 +270,14 @@ struct ModelDownloadOptionsSheet: View {
                         .font(Studio.sans(10).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
+            } else if gemmaVisionCompanionMissing {
+                Text("The SSD text model is ready. Download the vision pack to attach images. This fetches only the companion, not the text model again.")
+                    .font(Studio.body13)
+                    .foregroundStyle(Color.subtitleGray)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Download: about \(Self.storage(StreamedMoEInstall.approximateVisionCompanionBytes)) · Free: \(Self.storage(UInt64(max(store.availableBytes, 0))))")
+                    .font(Studio.sans(10))
+                    .foregroundStyle(.secondary)
             } else if isSSDReady {
                 Text("MLX Chat validated the streamed layout. The install stays on disk and only the experts needed for each token enter memory.")
                     .font(Studio.body13)
@@ -359,6 +380,10 @@ struct ModelDownloadOptionsSheet: View {
 
     private func useOrDownloadSSD() {
         guard let streamedModelID else { return }
+        if gemmaVisionCompanionMissing {
+            store.installStreamedModel(streamedModelID)
+            return
+        }
         if isSSDReady {
             let wasSelected = chat.selectedModelID == streamedModelID
             chat.selectModel(streamedModelID)

@@ -64,6 +64,21 @@ public struct GFTokenizer: @unchecked Sendable {
     public let thinkEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
+    /// Channel/tool markers that structure assistant output. Streaming treats
+    /// them as detokenizer barriers so a held byte run cannot span one.
+    public var structuralMarkerIDs: Set<Int32> {
+        var ids: Set<Int32> = [
+            toolCallStartID, toolCallEndID, toolResponseID, toolResponseEndID,
+            channelStartID, channelEndID,
+        ]
+        if let thinkStartID { ids.insert(thinkStartID) }
+        if let thinkEndID { ids.insert(thinkEndID) }
+        return ids
+    }
+    /// IDs `decode(skipSpecialTokens: true)` strips. Built from the resolved
+    /// dialect markers rather than a Hub `tokenizer.json` walk, so Qwen/Ornith
+    /// ChatML tokenizers still load.
+    let specialTokenIDs: Set<Int32>
 
     /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
     /// never use a BOS prefix (ChatML).
@@ -144,6 +159,15 @@ public struct GFTokenizer: @unchecked Sendable {
         self.thinkEndID = resolved.thinkEndID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
+        var specials: Set<Int32> = [
+            resolved.bosID, resolved.eosID, resolved.padID, resolved.endOfTurnID,
+            resolved.toolCallStartID, resolved.toolCallEndID,
+            resolved.toolResponseID, resolved.toolResponseEndID,
+            resolved.channelStartID, resolved.channelEndID,
+        ]
+        if let thinkStartID = resolved.thinkStartID { specials.insert(thinkStartID) }
+        if let thinkEndID = resolved.thinkEndID { specials.insert(thinkEndID) }
+        self.specialTokenIDs = specials
     }
 
     private struct ResolvedSpecialTokens {
@@ -269,8 +293,17 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     /// Decode token IDs to text. `skipSpecialTokens` strips BOS/EOS/turn markers from the output.
+    ///
+    /// Runs the incremental Gemma decoder sequence (see `GemmaDecoding`) plus
+    /// the local partial-byte hold-back rather than `Tokenizers.decode`, so
+    /// batch and streaming agree and a generation is O(1) per token.
     public func decode(_ ids: [Int32], skipSpecialTokens: Bool = true) -> String {
-        tokenizer.decode(tokens: ids.map(Int.init), skipSpecialTokens: skipSpecialTokens)
+        var detok = GFDetokenizer(tokenizer: self, skipSpecialTokens: skipSpecialTokens)
+        var text = ""
+        for id in ids {
+            text += detok.push(id)
+        }
+        return text + detok.flush()
     }
 
     // MARK: - Chat template

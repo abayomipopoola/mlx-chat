@@ -108,11 +108,15 @@ final class StreamedMoEEngine: ChatEngine {
 /// Serial owner of TurboFieldfare's non-copyable Metal and streaming state.
 private actor StreamedMoESession {
     private struct LoadedState {
+        let directory: URL
+        let architecture: StreamedMoEArchitecture
         let context: MetalContext
         let tokenizer: GFTokenizer
+        let model: Model
         let runner: RealForwardRunner
         let scratch: RawCompletionScratch
         let settings: StreamedMoERuntimeSettings
+        var vision: VisionRuntime?
     }
 
     private var loadedState: LoadedState?
@@ -166,11 +170,15 @@ private actor StreamedMoESession {
         try Task.checkCancellation()
 
         loadedState = LoadedState(
+            directory: directory,
+            architecture: variant.architecture,
             context: context,
             tokenizer: tokenizer,
+            model: model,
             runner: runner,
             scratch: scratch,
-            settings: settings)
+            settings: settings,
+            vision: nil)
         progress(1.0)
     }
 
@@ -197,12 +205,25 @@ private actor StreamedMoESession {
         }
 
         let thinkingEnabled = ThinkingPreference.isEnabled
-        let rendered = try StreamedMoEPrompt.render(
-            tokenizer: tokenizer,
-            history: trimmed,
-            systemPrompt: systemPrompt,
-            thinkingEnabled: thinkingEnabled)
-        let promptIDs = tokenizer.encode(rendered, addBOS: false)
+        let wantsImages = trimmed.contains { !$0.images.isEmpty }
+        let multimodalInput: MultimodalPrefillInput?
+        let promptIDs: [Int32]
+        if wantsImages {
+            let input = try encodeMultimodalPrompt(
+                history: trimmed,
+                systemPrompt: systemPrompt,
+                tokenizer: tokenizer)
+            multimodalInput = input
+            promptIDs = input.effectiveTokenIDs
+        } else {
+            multimodalInput = nil
+            let rendered = try StreamedMoEPrompt.render(
+                tokenizer: tokenizer,
+                history: trimmed,
+                systemPrompt: systemPrompt,
+                thinkingEnabled: thinkingEnabled)
+            promptIDs = tokenizer.encode(rendered, addBOS: false)
+        }
         let maxNewTokens = min(8_192, runner.maxContext - promptIDs.count)
         guard maxNewTokens > 0 else {
             throw EngineError.contextExceeded(
@@ -224,6 +245,7 @@ private actor StreamedMoESession {
             conversationID: conversationID,
             systemPrompt: systemPrompt,
             thinkingEnabled: thinkingEnabled)
+        if multimodalInput != nil { start = .reset }
         if case .resume = start, !(runner is any ContinuableLogitProducer) {
             start = .reset
         }
@@ -234,6 +256,7 @@ private actor StreamedMoESession {
                 producer: runner,
                 tokenizer: tokenizer,
                 promptIds: promptIDs,
+                multimodalInput: multimodalInput,
                 config: config,
                 context: context,
                 scratch: scratch,
@@ -263,6 +286,89 @@ private actor StreamedMoESession {
         return result.decodeSeconds > 0
             ? Double(result.newTokens) / result.decodeSeconds
             : nil
+    }
+
+    private func encodeMultimodalPrompt(
+        history: [EngineMessage],
+        systemPrompt: String,
+        tokenizer: GFTokenizer
+    ) throws -> MultimodalPrefillInput {
+        guard let state = loadedState else {
+            throw EngineError.generationFailed("Model is not loaded.")
+        }
+        guard state.architecture == .gemma4 else {
+            throw EngineError.generationFailed(
+                "This SSD-streamed model cannot use images.")
+        }
+        let vision: VisionRuntime
+        if let existing = state.vision {
+            vision = existing
+        } else {
+            do {
+                vision = try VisionRuntime.open(
+                    textModelURL: state.directory,
+                    context: state.context)
+            } catch {
+                throw EngineError.generationFailed(
+                    "Couldn’t open the vision pack: \(String(describing: error))")
+            }
+            loadedState?.vision = vision
+        }
+
+        var featuresByID: [UUID: VisionFeatures] = [:]
+        var messages: [MultimodalMessage] = []
+        let system = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !system.isEmpty {
+            messages.append(MultimodalMessage(role: .system, content: [.text(system)]))
+        }
+        for message in history {
+            var parts: [MultimodalContentPart] = []
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                parts.append(.text(text))
+            }
+            for data in message.images {
+                let id = UUID()
+                featuresByID[id] = try encodeAttachedImage(
+                    data,
+                    vision: vision,
+                    languageModel: state.model)
+                parts.append(.image(id: id))
+            }
+            if parts.isEmpty {
+                parts = [.text("")]
+            }
+            messages.append(MultimodalMessage(
+                role: message.role == .assistant ? .assistant : .user,
+                content: parts))
+        }
+        do {
+            return try MultimodalPromptRenderer.render(
+                messages: messages,
+                featuresByID: featuresByID,
+                tokenizer: tokenizer)
+        } catch {
+            throw EngineError.generationFailed(
+                "Couldn’t prepare the image prompt: \(String(describing: error))")
+        }
+    }
+
+    private func encodeAttachedImage(
+        _ data: Data,
+        vision: VisionRuntime,
+        languageModel: Model
+    ) throws -> VisionFeatures {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-chat-vision-\(UUID().uuidString).jpg")
+        do {
+            try data.write(to: url, options: .atomic)
+            return try vision.encodeImage(
+                at: url,
+                languageModel: languageModel)
+        } catch {
+            throw EngineError.generationFailed(
+                "Couldn’t encode the attached image: \(String(describing: error))")
+        }
     }
 }
 

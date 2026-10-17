@@ -75,17 +75,30 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var useClock = 0
     private let cacheLock = NSLock()
 
-    public init(layout: StreamLayout,
-                device: MTLDevice,
-                slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .lfu) throws {
+    public convenience init(layout: StreamLayout,
+                            device: MTLDevice,
+                            slotCount: Int,
+                            cachePolicy: ExpertCachePolicy = .lfu) throws {
+        try self.init(layout: layout,
+                      device: device,
+                      slotCount: slotCount,
+                      cachePolicy: cachePolicy,
+                      fileDescriptor: nil)
+    }
+
+    package init(layout: StreamLayout,
+                 device: MTLDevice,
+                 slotCount: Int,
+                 cachePolicy: ExpertCachePolicy = .lfu,
+                 fileDescriptor: Int32?) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
         self.cachePolicy = cachePolicy
         let pageSize = Int(getpagesize())
 
-        let openedFD = open(layout.path, O_RDONLY)
+        let openedFD = fileDescriptor.map { fcntl($0, F_DUPFD_CLOEXEC, 0) }
+            ?? open(layout.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
         guard openedFD >= 0 else {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
@@ -141,6 +154,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
+    }
+
+    public var diagnosticSlotScratchBytes: UInt64 {
+        UInt64(slotBuffers.reduce(0) { $0 + $1.length })
     }
 
     deinit {

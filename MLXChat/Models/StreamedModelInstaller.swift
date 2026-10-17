@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 
 struct StreamedInstallProgress: Equatable, Sendable {
     enum Phase: Equatable, Sendable {
@@ -12,13 +13,34 @@ struct StreamedInstallProgress: Equatable, Sendable {
     let fraction: Double?
     let downloadedBytes: UInt64?
     let totalBytes: UInt64?
+    let isVision: Bool
+
+    init(
+        phase: Phase,
+        fraction: Double?,
+        downloadedBytes: UInt64?,
+        totalBytes: UInt64?,
+        isVision: Bool = false
+    ) {
+        self.phase = phase
+        self.fraction = fraction
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+        self.isVision = isVision
+    }
 
     var title: String {
         switch phase {
-        case .preparing: return "Preparing download"
-        case .downloading: return "Downloading and preparing for SSD"
-        case .verifying: return "Verifying model"
-        case .ready: return "SSD model ready"
+        case .preparing:
+            return isVision ? "Preparing vision pack" : "Preparing download"
+        case .downloading:
+            return isVision
+                ? "Downloading vision pack"
+                : "Downloading and preparing for SSD"
+        case .verifying:
+            return isVision ? "Verifying vision pack" : "Verifying model"
+        case .ready:
+            return isVision ? "Vision pack ready" : "SSD model ready"
         }
     }
 }
@@ -96,6 +118,7 @@ final class StreamedModelInstaller: @unchecked Sendable {
     func install(
         variant: StreamedMoEVariant,
         at outputDirectory: URL,
+        companionOnly: Bool = false,
         onProgress: @escaping @Sendable (StreamedInstallProgress) -> Void
     ) async throws {
         guard let helperURL,
@@ -107,51 +130,144 @@ final class StreamedModelInstaller: @unchecked Sendable {
             at: outputDirectory.deletingLastPathComponent(),
             withIntermediateDirectories: true)
 
-        let paths = StreamedModelInstallPaths(finalDirectory: outputDirectory)
-        let canResume = FileManager.default.fileExists(atPath: paths.checkpointFile.path)
-            && FileManager.default.fileExists(atPath: paths.partialDirectory.path)
+        if !companionOnly {
+            try await runHelper(
+                helperURL: helperURL,
+                arguments: Self.textInstallArguments(
+                    variant: variant, outputDirectory: outputDirectory),
+                checkpointURL: StreamedModelInstallPaths(
+                    finalDirectory: outputDirectory).checkpointFile,
+                isVision: false,
+                onProgress: onProgress)
+            try Task.checkCancellation()
+            onProgress(StreamedInstallProgress(
+                phase: .verifying,
+                fraction: 0.99,
+                downloadedBytes: nil,
+                totalBytes: nil))
+            if let error = StreamedMoEInstall.validationError(
+                at: outputDirectory,
+                for: variant) {
+                throw StreamedModelInstallerError.invalidInstall(error)
+            }
+        }
 
+        if variant.architecture == .gemma4 {
+            try await installVisionCompanion(
+                helperURL: helperURL,
+                variant: variant,
+                textDirectory: outputDirectory,
+                onProgress: onProgress)
+        }
+
+        let readyBytes = companionOnly
+            ? StreamedMoEInstall.approximateVisionCompanionBytes
+            : variant.approximateDownloadBytes
+        onProgress(StreamedInstallProgress(
+            phase: .ready,
+            fraction: 1,
+            downloadedBytes: readyBytes,
+            totalBytes: readyBytes,
+            isVision: companionOnly))
+    }
+
+    private func installVisionCompanion(
+        helperURL: URL,
+        variant: StreamedMoEVariant,
+        textDirectory: URL,
+        onProgress: @escaping @Sendable (StreamedInstallProgress) -> Void
+    ) async throws {
+        let companion = try VisionPackLocation.companionURL(forTextModel: textDirectory)
+        try FileManager.default.createDirectory(
+            at: companion.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try await runHelper(
+            helperURL: helperURL,
+            arguments: Self.visionInstallArguments(
+                variant: variant,
+                textDirectory: textDirectory,
+                companionDirectory: companion),
+            checkpointURL: StreamedModelInstallPaths(
+                finalDirectory: companion).checkpointFile,
+            isVision: true,
+            onProgress: onProgress)
+        try Task.checkCancellation()
+        onProgress(StreamedInstallProgress(
+            phase: .verifying,
+            fraction: 0.99,
+            downloadedBytes: nil,
+            totalBytes: StreamedMoEInstall.approximateVisionCompanionBytes,
+            isVision: true))
+        guard StreamedMoEInstall.visionCompanionLooksPresent(beside: textDirectory) else {
+            throw StreamedModelInstallerError.invalidInstall(
+                "The vision companion pack was not written beside the SSD model.")
+        }
+    }
+
+    static func textInstallArguments(
+        variant: StreamedMoEVariant,
+        outputDirectory: URL
+    ) -> [String] {
+        let paths = StreamedModelInstallPaths(finalDirectory: outputDirectory)
         var arguments = [
             "--model", variant.helperModelArgument,
             "--output", outputDirectory.path,
             "--overwrite",
         ]
-        if canResume { arguments.append("--resume") }
+        if FileManager.default.fileExists(atPath: paths.checkpointFile.path)
+            && FileManager.default.fileExists(atPath: paths.partialDirectory.path) {
+            arguments.append("--resume")
+        }
+        return arguments
+    }
 
+    static func visionInstallArguments(
+        variant: StreamedMoEVariant,
+        textDirectory: URL,
+        companionDirectory: URL
+    ) -> [String] {
+        let paths = StreamedModelInstallPaths(finalDirectory: companionDirectory)
+        var arguments = [
+            "--write-vision",
+            "--model", variant.helperModelArgument,
+            "--text-model", textDirectory.path,
+            "--output", companionDirectory.path,
+            "--overwrite",
+        ]
+        if FileManager.default.fileExists(atPath: paths.checkpointFile.path)
+            && FileManager.default.fileExists(atPath: paths.partialDirectory.path) {
+            arguments.append("--resume")
+        }
+        return arguments
+    }
+
+    private func runHelper(
+        helperURL: URL,
+        arguments: [String],
+        checkpointURL: URL,
+        isVision: Bool,
+        onProgress: @escaping @Sendable (StreamedInstallProgress) -> Void
+    ) async throws {
         onProgress(StreamedInstallProgress(
             phase: .preparing,
             fraction: nil,
             downloadedBytes: nil,
-            totalBytes: nil))
+            totalBytes: isVision
+                ? StreamedMoEInstall.approximateVisionCompanionBytes
+                : nil,
+            isVision: isVision))
 
         let monitor = Task { [weak self] in
             while !Task.isCancelled {
-                if let progress = self?.checkpointProgress(at: paths.checkpointFile) {
+                if let progress = self?.checkpointProgress(
+                    at: checkpointURL, isVision: isVision) {
                     onProgress(progress)
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
         defer { monitor.cancel() }
-
         try await execute(helperURL: helperURL, arguments: arguments)
-        try Task.checkCancellation()
-
-        onProgress(StreamedInstallProgress(
-            phase: .verifying,
-            fraction: 0.99,
-            downloadedBytes: nil,
-            totalBytes: nil))
-        if let error = StreamedMoEInstall.validationError(
-            at: outputDirectory,
-            for: variant) {
-            throw StreamedModelInstallerError.invalidInstall(error)
-        }
-        onProgress(StreamedInstallProgress(
-            phase: .ready,
-            fraction: 1,
-            downloadedBytes: variant.approximateDownloadBytes,
-            totalBytes: variant.approximateDownloadBytes))
     }
 
     func cancel() {
@@ -161,12 +277,18 @@ final class StreamedModelInstaller: @unchecked Sendable {
         if process?.isRunning == true { process?.terminate() }
     }
 
-    func checkpointProgress(at checkpointURL: URL) -> StreamedInstallProgress? {
+    func checkpointProgress(
+        at checkpointURL: URL,
+        isVision: Bool = false
+    ) -> StreamedInstallProgress? {
         guard let data = try? Data(contentsOf: checkpointURL) else { return nil }
-        return Self.checkpointProgress(data: data)
+        return Self.checkpointProgress(data: data, isVision: isVision)
     }
 
-    static func checkpointProgress(data: Data) -> StreamedInstallProgress? {
+    static func checkpointProgress(
+        data: Data,
+        isVision: Bool = false
+    ) -> StreamedInstallProgress? {
         guard let checkpoint = try? JSONDecoder().decode(Checkpoint.self, from: data),
               checkpoint.totalSourceBytes > 0 else {
             return nil
@@ -180,7 +302,8 @@ final class StreamedModelInstaller: @unchecked Sendable {
             phase: .downloading,
             fraction: fraction,
             downloadedBytes: downloaded,
-            totalBytes: checkpoint.totalSourceBytes)
+            totalBytes: checkpoint.totalSourceBytes,
+            isVision: isVision)
     }
 
     private func execute(helperURL: URL, arguments: [String]) async throws {

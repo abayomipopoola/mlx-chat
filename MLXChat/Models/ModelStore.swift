@@ -159,7 +159,12 @@ final class ModelStore {
     var allModels: [CatalogModel] { ModelCatalog.models + customModels }
 
     func model(for id: String) -> CatalogModel? {
-        allModels.first { $0.id == id }.map { ModelCatalog.applyingKnownCapabilities(to: $0) }
+        guard let model = allModels.first(where: { $0.id == id }).map({
+            ModelCatalog.applyingKnownCapabilities(to: $0)
+        }) else { return nil }
+        return StreamedMoEInstall.applyingVisionPackPresence(
+            to: model,
+            directory: availableDirectory(for: id))
     }
 
     // MARK: - Local availability
@@ -589,7 +594,13 @@ final class ModelStore {
         guard let variant = StreamedMoEInstall.variant(
             forStreamedModelID: modelID),
               streamedInstallTasks[modelID] == nil else { return }
-        if isAvailable(modelID) {
+        let textIsValid = StreamedMoEInstall.validationError(
+            at: variant.managedDirectory,
+            for: variant) == nil
+        let companionOnly = variant.architecture == .gemma4
+            && textIsValid
+            && variant.needsVisionCompanion
+        if isAvailable(modelID), !companionOnly {
             streamedInstallProgressByModelID[modelID] = StreamedInstallProgress(
                 phase: .ready,
                 fraction: 1,
@@ -597,9 +608,7 @@ final class ModelStore {
                 totalBytes: variant.approximateDownloadBytes)
             return
         }
-        if StreamedMoEInstall.validationError(
-            at: variant.managedDirectory,
-            for: variant) == nil {
+        if textIsValid, !companionOnly {
             _ = registerManagedStreamedModelDirectory(
                 variant.managedDirectory,
                 variant: variant)
@@ -613,7 +622,10 @@ final class ModelStore {
             phase: .preparing,
             fraction: nil,
             downloadedBytes: nil,
-            totalBytes: nil)
+            totalBytes: companionOnly
+                ? StreamedMoEInstall.approximateVisionCompanionBytes
+                : nil,
+            isVision: companionOnly)
 
         let outputDirectory = variant.managedDirectory
         let installer = StreamedModelInstaller()
@@ -623,7 +635,8 @@ final class ModelStore {
             do {
                 try await installer.install(
                     variant: variant,
-                    at: outputDirectory) { [weak self] progress in
+                    at: outputDirectory,
+                    companionOnly: companionOnly) { [weak self] progress in
                     Task { @MainActor [weak self] in
                         self?.streamedInstallProgressByModelID[modelID] = progress
                         self?.downloadProgress[modelID] = progress.fraction ?? 0.01
@@ -638,6 +651,15 @@ final class ModelStore {
                         requiresValidation: false) {
                         streamedInstallErrors[modelID] = error
                         lastError = error
+                    } else if companionOnly {
+                        streamedInstallProgressByModelID[modelID] = StreamedInstallProgress(
+                            phase: .ready,
+                            fraction: 1,
+                            downloadedBytes:
+                                StreamedMoEInstall.approximateVisionCompanionBytes,
+                            totalBytes:
+                                StreamedMoEInstall.approximateVisionCompanionBytes,
+                            isVision: true)
                     }
                 }
             } catch is CancellationError {

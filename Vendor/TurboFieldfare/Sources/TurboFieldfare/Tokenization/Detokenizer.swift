@@ -20,83 +20,61 @@ import Tokenizers
 ///    `⇔ ⟺ ∨ ≡`, so every one of them used to reach the transcript as `\u{FFFD}`.
 ///
 /// Strategy:
-///   - During `push(_:)` we decode the longest prefix of accumulated IDs that
-///     does NOT end with byte-fallback tokens, then emit the delta vs. previously
-///     emitted text. Any trailing byte-fallback IDs are held back.
-///   - A trailing run of U+FFFD is held back too, for as long as it stays
-///     trailing. That covers challenge 3 without needing to know the vocabulary
-///     spelling: once the codepoint completes, the placeholder disappears from
-///     the decode and the real character is emitted in its place.
-///   - During `flush()` we decode the stable prefix as above AND manually
-///     assemble the trailing byte-fallback bytes into a UTF-8 string. This
-///     recovers text the library would otherwise drop on a sequence-ending
-///     codepoint.
+///   - `GemmaDecoding` + `ByteFallbackRun` give O(1) incremental decode for
+///     the declared Gemma sequence (`Replace`, `ByteFallback`, `Fuse`) without
+///     re-decoding the accumulated ID list.
+///   - Local hold-back is re-implemented as incremental partial-byte buffering
+///     (`PartialByteBuffer`) on top of that core: trailing `<0xNN>` bytes stay
+///     in `ByteFallbackRun`, and byte-level BPE pieces stay in the partial
+///     buffer until they form a complete UTF-8 character. A trailing U+FFFD is
+///     never emitted mid-stream. `flush()` assembles a complete trailing byte
+///     tail and drops an unfinished codepoint.
+///   - ChatML (Qwen/Ornith) maps each whole vocab token through the GPT-2
+///     `unicodeToByte` table. A single-scalar map would leave `Ġthe` as
+///     literal `Ġthe`. Gemma stays on SentencePiece `▁` / `<0xNN>`.
+///
+/// `barrierTokenIDs` commits both buffers so channel/tool markers do not steal
+/// held text from the previous channel.
 struct GFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
-    @usableFromInline var stableIDs: [Int] = []
-    @usableFromInline var trailingByteIDs: [Int] = []
-    @usableFromInline var cursor = GFEmitCursor()
+    let skipSpecialTokens: Bool
+    private let dialect: ChatDialect
+    private let specialTokenIDs: Set<Int32>
+    private let barrierTokenIDs: Set<Int32>
+    private var run = ByteFallbackRun()
+    private var partial = PartialByteBuffer()
 
-    init(tokenizer: GFTokenizer) {
+    init(tokenizer: GFTokenizer,
+         skipSpecialTokens: Bool = true,
+         barrierTokenIDs: Set<Int32> = []) {
         self.tokenizer = tokenizer.tokenizer
+        self.skipSpecialTokens = skipSpecialTokens
+        self.dialect = tokenizer.dialect
+        self.specialTokenIDs = tokenizer.specialTokenIDs
+        self.barrierTokenIDs = barrierTokenIDs
     }
 
     mutating func push(_ id: Int32) -> String {
-        let tokenID = Int(id)
-        let token = tokenizer.convertIdToToken(tokenID) ?? ""
-        if Self.isByteFallback(token) {
-            trailingByteIDs.append(tokenID)
-            return ""
+        guard let token = tokenizer.convertIdToToken(Int(id)) else { return "" }
+        if skipSpecialTokens, specialTokenIDs.contains(id) {
+            return barrierTokenIDs.contains(id) ? commitHeld() : ""
         }
-
-        if !trailingByteIDs.isEmpty {
-            stableIDs.append(contentsOf: trailingByteIDs)
-            trailingByteIDs.removeAll(keepingCapacity: true)
+        if dialect == .chatml {
+            return run.commit() + partial.pushByteLevelToken(token)
         }
-        stableIDs.append(tokenID)
-
-        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(GFEmitCursor.holdingTrailingReplacements(current))
+        if let byte = GemmaDecoding.byteValue(token) {
+            return run.push(byte)
+        }
+        return run.commit() + partial.pushText(GemmaDecoding.fragment(token))
     }
 
     mutating func flush() -> String {
-        let decoded = stableIDs.isEmpty
-            ? ""
-            : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        // The stream is over, so a still-incomplete codepoint is never going to
-        // arrive. Drop the placeholder rather than show it. Trim before joining
-        // the byte-fallback tail, or the tail would make the placeholder
-        // non-trailing and the trim would miss it.
-        let stableText = GFEmitCursor.holdingTrailingReplacements(decoded)
-
-        let trailingText = assembleByteFallback(trailingByteIDs)
-        return commitDelta(stableText + trailingText)
+        // Stream over: assemble a complete trailing byte tail, then drop a
+        // still-incomplete codepoint rather than show U+FFFD.
+        run.commit(dropIncomplete: true) + partial.flush()
     }
 
-    @usableFromInline
-    mutating func commitDelta(_ current: String) -> String {
-        cursor.commit(current)
-    }
-
-    @usableFromInline
-    func assembleByteFallback(_ ids: [Int]) -> String {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(ids.count)
-        for id in ids {
-            guard let tok = tokenizer.convertIdToToken(id) else { continue }
-            guard Self.isByteFallback(tok),
-                  let byte = UInt8(tok.dropFirst(3).dropLast(), radix: 16)
-            else { continue }
-            bytes.append(byte)
-        }
-        return String(bytes: bytes, encoding: .utf8) ?? ""
-    }
-
-    @usableFromInline
-    static func isByteFallback(_ token: String) -> Bool {
-        token.count == 6
-            && token.hasPrefix("<0x")
-            && token.hasSuffix(">")
-            && token.dropFirst(3).dropLast().allSatisfy { $0.isHexDigit }
+    private mutating func commitHeld() -> String {
+        run.commit(dropIncomplete: true) + partial.flush()
     }
 }

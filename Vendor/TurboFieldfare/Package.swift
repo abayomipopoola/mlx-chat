@@ -16,8 +16,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "TurboFieldfareFormat",
+            path: "Sources/TurboFieldfareFormat"
+        ),
+        .target(
             name: "TurboFieldfare",
             dependencies: [
+                "TurboFieldfareFormat",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/TurboFieldfare",
@@ -27,6 +32,7 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareRepackCore",
+            dependencies: ["TurboFieldfareFormat"],
             path: "Sources/TurboFieldfareRepack/Core"
         ),
         .executableTarget(

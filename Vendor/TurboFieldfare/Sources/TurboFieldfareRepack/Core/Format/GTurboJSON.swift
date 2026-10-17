@@ -1,13 +1,15 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// JSON encoders for `manifest.json` and `packed_experts/layout.json`. The
 /// files are small (kilobytes), so we use Foundation's `JSONSerialization`
 /// rather than streaming.
+
 enum GTurboJSON {
 
-    static let magic = "GTURBO"
-    static let versionMajor = 1
-    static let versionMinor = 0
+    static let magic = GTurboFormatV1.magic
+    static let versionMajor = GTurboFormatV1.versionMajor
+    static let versionMinor = GTurboFormatV1.versionMinor
 
     struct FileEntry {
         let size: UInt64

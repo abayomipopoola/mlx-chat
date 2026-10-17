@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import MLXChat
 
 @Suite struct StreamedMoETests {
@@ -119,9 +120,96 @@ import Testing
             fileExists: { $0 != skipped.path },
             moveToTrash: { moved.append($0) })
 
-        #expect(artifacts.last == variant.managedDirectory)
-        #expect(moved == [artifacts[0], artifacts[2]])
+        let companion = try VisionPackLocation.companionURL(
+            forTextModel: variant.managedDirectory)
+        let companionPaths = StreamedModelInstallPaths(finalDirectory: companion)
+        #expect(artifacts == [
+            variant.managedInstallPaths.checkpointFile,
+            variant.managedInstallPaths.partialDirectory,
+            companionPaths.checkpointFile,
+            companionPaths.partialDirectory,
+            variant.managedDirectory,
+            companion,
+        ])
+        #expect(moved == [
+            artifacts[0], artifacts[2], artifacts[3], artifacts[4], artifacts[5],
+        ])
+        #expect(moved.last == companion)
+    }
+
+    @Test func managedRemovalIncludesCompanionArtifactsWhenPresent() throws {
+        let variant = StreamedMoEInstall.qat
+        let companion = try VisionPackLocation.companionURL(
+            forTextModel: variant.managedDirectory)
+        let companionPaths = StreamedModelInstallPaths(finalDirectory: companion)
+        let present: Set<String> = [
+            variant.managedInstallPaths.checkpointFile.path,
+            companionPaths.checkpointFile.path,
+            companion.path,
+        ]
+        var moved: [URL] = []
+
+        try ModelStore.moveExistingManagedArtifactsToTrash(
+            variant.managedInstallArtifactURLs,
+            fileExists: { present.contains($0) },
+            moveToTrash: { moved.append($0) })
+
+        #expect(moved == [
+            variant.managedInstallPaths.checkpointFile,
+            companionPaths.checkpointFile,
+            companion,
+        ])
+        #expect(moved.last == companion)
+    }
+
+    @Test func managedRemovalIsUnchangedWhenCompanionIsAbsent() throws {
+        let variant = StreamedMoEInstall.qat
+        let text = variant.managedInstallPaths
+        let present: Set<String> = [text.checkpointFile.path, text.finalDirectory.path]
+        var moved: [URL] = []
+
+        try ModelStore.moveExistingManagedArtifactsToTrash(
+            variant.managedInstallArtifactURLs,
+            fileExists: { present.contains($0) },
+            moveToTrash: { moved.append($0) })
+
+        #expect(moved == [text.checkpointFile, text.finalDirectory])
         #expect(moved.last == variant.managedDirectory)
+    }
+
+    @Test func managedRemovalTrashesSidecarsBeforeFinalDirectories() throws {
+        let variant = StreamedMoEInstall.standard
+        let artifacts = variant.managedInstallArtifactURLs
+        var moved: [URL] = []
+
+        try ModelStore.moveExistingManagedArtifactsToTrash(
+            artifacts,
+            fileExists: { _ in true },
+            moveToTrash: { moved.append($0) })
+
+        let finals = Set([
+            variant.managedDirectory.path,
+            try VisionPackLocation.companionURL(
+                forTextModel: variant.managedDirectory).path,
+        ])
+        let lastSidecarIndex = moved.lastIndex(where: { !finals.contains($0.path) })
+        let firstFinalIndex = moved.firstIndex(where: { finals.contains($0.path) })
+        #expect(lastSidecarIndex != nil)
+        #expect(firstFinalIndex != nil)
+        #expect(lastSidecarIndex! < firstFinalIndex!)
+        #expect(Set(moved.suffix(2).map(\.path)) == finals)
+    }
+
+    @Test func qwenAndOrnithRemovalListsStayTextOnlyEvenWithAFakeCompanion() throws {
+        for variant in [StreamedMoEInstall.qwen36, StreamedMoEInstall.ornith15] {
+            #expect(variant.managedInstallArtifactURLs == [
+                variant.managedInstallPaths.checkpointFile,
+                variant.managedInstallPaths.partialDirectory,
+                variant.managedDirectory,
+            ])
+            #expect(variant.companionDirectory == nil)
+            #expect(!variant.needsVisionCompanion)
+        }
     }
 
     @Test func managedInstallStateDistinguishesCompleteAndResumableFiles() {
@@ -146,6 +234,22 @@ import Testing
         ])
     }
 
+    @Test func visionHelperArgumentsUseWriteVisionMode() throws {
+        let text = URL(fileURLWithPath: "/tmp/Gemma4-26B-A4B-QAT.gturbo")
+        let companion = try VisionPackLocation.companionURL(forTextModel: text)
+        let arguments = StreamedModelInstaller.visionInstallArguments(
+            variant: StreamedMoEInstall.qat,
+            textDirectory: text,
+            companionDirectory: companion)
+        #expect(arguments.contains("--write-vision"))
+        #expect(arguments.contains("--text-model"))
+        #expect(arguments.contains(text.path))
+        #expect(arguments.contains("--output"))
+        #expect(arguments.contains(companion.path))
+        #expect(arguments.contains("gemma4-qat"))
+        #expect(companion.lastPathComponent == "Gemma4-26B-A4B-QAT.vision.gturbo")
+    }
+
     @Test func bundledInstallerIsEmbeddedAndRunnable() throws {
         let helper = try #require(StreamedModelInstaller.bundledHelperURL())
         #expect(FileManager.default.isExecutableFile(atPath: helper.path))
@@ -164,6 +268,12 @@ import Testing
         #expect(process.terminationStatus == 0)
         #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15>"))
         #expect(text.contains("--dry-run"))
+        #expect(text.contains("--write-vision"))
+        #expect(text.contains("--text-model <text.gturbo>"))
+        #expect(text.contains("--output <name.vision.gturbo>"))
+        #expect(text.contains("--model <gemma4|gemma4-qat>"))
+        #expect(text.contains("[--overwrite] [--resume]"))
+        #expect(text.contains("Vision-write mode"))
     }
 
     @Test func installerProgressReadsResumableCheckpoint() throws {

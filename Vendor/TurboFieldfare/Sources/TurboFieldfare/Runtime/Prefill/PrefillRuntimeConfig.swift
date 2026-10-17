@@ -83,7 +83,54 @@ struct PrefillChunkSpan: Sendable, Equatable {
 
 }
 
+/// One item of a multimodal prefill turn: either a run of text small enough to
+/// fit the chunk scratch, or exactly one image span, which executes whole.
+struct PrefillWorkItem: Sendable, Equatable {
+    let range: Range<Int>
+    let imageIndex: Int?
+
+    init(range: Range<Int>, imageIndex: Int?) {
+        self.range = range
+        self.imageIndex = imageIndex
+    }
+
+    var isImage: Bool { imageIndex != nil }
+}
+
 enum PrefillChunkPlanner {
+    /// Splits a multimodal prompt into the items a turn executes, in order.
+    ///
+    /// Text is cut at the same clamp the scratch layout applies, so the split
+    /// and the buffer it runs against can never disagree; image spans pass
+    /// through whole, because an image's features are one indivisible block.
+    /// `imageRanges` must be sorted, non-overlapping, and inside `tokenCount`.
+    static func multimodalWork(tokenCount: Int,
+                               imageRanges: [Range<Int>],
+                               chunkTokens: Int) -> [PrefillWorkItem] {
+        precondition(tokenCount >= 0, "prefill tokenCount must be non-negative")
+        let chunk = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        var work: [PrefillWorkItem] = []
+
+        func appendText(_ range: Range<Int>) {
+            guard !range.isEmpty else { return }
+            var offset = range.lowerBound
+            while offset < range.upperBound {
+                let end = min(range.upperBound, offset + chunk)
+                work.append(PrefillWorkItem(range: offset..<end, imageIndex: nil))
+                offset = end
+            }
+        }
+
+        var cursor = 0
+        for (index, imageRange) in imageRanges.enumerated() {
+            appendText(cursor..<imageRange.lowerBound)
+            work.append(PrefillWorkItem(range: imageRange, imageIndex: index))
+            cursor = imageRange.upperBound
+        }
+        appendText(cursor..<tokenCount)
+        return work
+    }
+
     static func spans(tokenCount: Int,
                              startPosition: Int,
                              config: PrefillRuntimeConfig) -> [PrefillChunkSpan] {
@@ -186,6 +233,20 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
 
     public static var defaultChunked: PrefillRuntimeConfig {
         production(chunkTokens: 128)
+    }
+
+    /// This config at a different chunk size, all other settings intact. The
+    /// multimodal path runs each work item at the size it was planned at.
+    public func replacingChunkTokens(_ tokens: Int) -> PrefillRuntimeConfig {
+        PrefillRuntimeConfig(mode: mode, chunkTokens: max(1, tokens))
+    }
+
+    /// Whether the chunked path an image prompt needs is switched on.
+    public var servesImagePrompt: Bool { mode == .chunked }
+
+    /// The config an image prompt can run under, or nil when it already runs.
+    public func coercedForImagePrompt() -> PrefillRuntimeConfig? {
+        servesImagePrompt ? nil : .defaultChunked
     }
 
     public static func production(chunkTokens: Int) -> PrefillRuntimeConfig {

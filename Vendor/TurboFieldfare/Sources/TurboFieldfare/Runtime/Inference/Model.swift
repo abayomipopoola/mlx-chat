@@ -40,6 +40,7 @@ public struct Model {
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
     let directoryURL: URL
+    let modelDirectory: GTurboModelDirectory
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -64,7 +65,8 @@ public struct Model {
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
-         directoryURL: URL) {
+         directoryURL: URL,
+         modelDirectory: GTurboModelDirectory) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -75,6 +77,7 @@ public struct Model {
         self.packedExpertsLayout = packedExpertsLayout
         self.manifest = manifest
         self.directoryURL = directoryURL
+        self.modelDirectory = modelDirectory
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "turbo-fieldfare.expert-streamers")
     }
@@ -310,32 +313,34 @@ public struct Model {
             return
         }
         let basename = packedExpertsLayout.layers[L].file
-        let url = directoryURL
-            .appendingPathComponent("packed_experts")
-            .appendingPathComponent(basename)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw ModelError.missingFile(name: "packed_experts/\(basename)")
-        }
+        let manifestRel = "packed_experts/\(basename)"
+        let layerFD = try modelDirectory.openFile(manifestRel)
+        defer { close(layerFD) }
         if !streamersBox.layerVerified[L] {
-            let manifestRel = "packed_experts/\(basename)"
             guard let entry = manifest.files[manifestRel] else {
                 throw ModelError.missingFile(name: manifestRel)
             }
             switch integrityPolicy {
             case .fullSha256:
-                try Sha256Verifier.verifyFile(at: url, named: manifestRel,
+                try Sha256Verifier.verifyFile(fileDescriptor: layerFD,
+                                              named: manifestRel,
                                               expectedHex: entry.sha256)
             case .sizeCheckTrustedReceipt:
-                try Self.verifyTrustedReceiptFileSize(url: url,
-                                                      relativePath: manifestRel,
-                                                      expectedSize: entry.size)
+                let actualSize = try modelDirectory.fileSize(
+                    fileDescriptor: layerFD, relativePath: manifestRel)
+                guard actualSize == entry.size else {
+                    throw ModelError.trustedReceiptInvalid(
+                        detail: "\(manifestRel) size \(actualSize) != \(entry.size)")
+                }
             }
             streamersBox.layerVerified[L] = true
         }
         let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
             * packedExpertsLayout.expertStride
         let layout = StreamLayout(
-            path: url.path,
+            path: directoryURL
+                .appendingPathComponent("packed_experts")
+                .appendingPathComponent(basename).path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
@@ -350,12 +355,46 @@ public struct Model {
             layout: layout,
             device: device,
             slotCount: slotCount,
-            cachePolicy: expertCachePolicy)
+            cachePolicy: expertCachePolicy,
+            fileDescriptor: layerFD)
     }
 
     /// Test hook: how many layer files have been opened so far.
     public func openLayerFileCount() -> Int {
         streamersQueue.sync { streamersBox.streamers.compactMap { $0 }.count }
+    }
+
+    public func prepareExpertResidencyForVision(
+        _ policy: VisionResidencyPolicy,
+        gpuDrainNanoseconds: UInt64 = 0
+    ) -> VisionExpertResidencyTransition {
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        return streamersQueue.sync {
+            let releasedLayerCount = streamersBox.streamers.compactMap { $0 }.count
+            let releasedBytes = streamersBox.streamers.compactMap { $0 }.reduce(UInt64(0)) {
+                $0 + $1.diagnosticSlotScratchBytes
+            }
+            if policy == .onDemand {
+                var released = streamersBox.streamers
+                streamersBox.streamers = Array(
+                    repeating: nil, count: packedExpertsLayout.numLayers)
+                // `layerVerified` deliberately survives the release. Clearing it
+                // would make every image turn from the second on re-verify all
+                // packed expert files inside this queue.
+                released.removeAll()
+            }
+            let remaining = streamersBox.streamers.compactMap { $0 }
+            return VisionExpertResidencyTransition(
+                policy: policy,
+                gpuDrainNanoseconds: gpuDrainNanoseconds,
+                releasedLayerCount: policy == .onDemand ? releasedLayerCount : 0,
+                releasedSlotScratchBytes: policy == .onDemand ? releasedBytes : 0,
+                remainingOpenLayerCount: remaining.count,
+                remainingSlotScratchBytes: remaining.reduce(UInt64(0)) {
+                    $0 + $1.diagnosticSlotScratchBytes
+                },
+                wallNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
+        }
     }
 
 }
@@ -399,19 +438,37 @@ extension Model {
         }
         let resolvedIntegrityPolicy = integrityPolicy ?? .fullSha256
 
-        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+        let modelDirectory = try GTurboModelDirectory(rootURL: directoryURL)
+        let manifestFD: Int32
+        do {
+            manifestFD = try modelDirectory.openFile("manifest.json")
+        } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
+        defer { close(manifestFD) }
+        let manifestData = try modelDirectory.readMetadata(
+            fileDescriptor: manifestFD, relativePath: "manifest.json",
+            maxBytes: ManifestReader.defaultMaxBytes)
+        let manifestSize = UInt64(manifestData.count)
         let manifestShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let manifestSha = try Sha256Verifier.hashFile(at: manifestURL)
+        let manifestSha = Sha256Verifier.hashData(manifestData)
         stats.manifestSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - manifestShaStart
-        let manifestSize = try Self.fileSize(at: manifestURL,
-                                             relativePath: "manifest.json")
         let receipt: VerifiedInstallReceipt?
         if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let loadedReceipt = try VerifiedInstallReceiptReader.load(directoryURL: directoryURL)
+            let receiptFD: Int32
+            do {
+                receiptFD = try modelDirectory.openFile(VerifiedInstallReceiptReader.fileName)
+            } catch ModelError.missingFile {
+                throw ModelError.trustedReceiptInvalid(
+                    detail: "\(VerifiedInstallReceiptReader.fileName) is missing")
+            }
+            defer { close(receiptFD) }
+            let receiptData = try modelDirectory.readMetadata(
+                fileDescriptor: receiptFD,
+                relativePath: VerifiedInstallReceiptReader.fileName,
+                maxBytes: VerifiedInstallReceiptReader.defaultMaxBytes)
+            let loadedReceipt = try VerifiedInstallReceiptReader.decode(data: receiptData)
             try VerifiedInstallReceiptReader.validateManifestBinding(
                 loadedReceipt,
                 directoryURL: directoryURL,
@@ -422,8 +479,8 @@ extension Model {
             receipt = nil
         }
 
-        let manifest = try ManifestReader.load(directoryURL: directoryURL,
-                                               expecting: expecting)
+        let manifest = try ManifestReader.decode(
+            data: manifestData, expecting: expecting)
         if let receipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try VerifiedInstallReceiptReader.validate(receipt,
@@ -436,51 +493,75 @@ extension Model {
 
         // Verify the small, always-touched files before mapping model data.
         let weightsURL = directoryURL.appendingPathComponent("model_weights.bin")
-        let layoutURL  = directoryURL
-            .appendingPathComponent("packed_experts")
-            .appendingPathComponent("layout.json")
         guard let weightsEntry = manifest.files["model_weights.bin"] else {
             throw ModelError.missingFile(name: "model_weights.bin")
         }
         guard let layoutEntry = manifest.files["packed_experts/layout.json"] else {
             throw ModelError.missingFile(name: "packed_experts/layout.json")
         }
+        let weightsFD = try modelDirectory.openFile("model_weights.bin")
+        defer { close(weightsFD) }
+        let layoutFD = try modelDirectory.openFile("packed_experts/layout.json")
+        defer { close(layoutFD) }
+        let layoutData = try modelDirectory.readMetadata(
+            fileDescriptor: layoutFD, relativePath: "packed_experts/layout.json",
+            maxBytes: PackedExpertsLayoutReader.defaultMaxBytes)
+        guard UInt64(layoutData.count) == layoutEntry.size else {
+            throw ModelError.tensorSizeMismatch(
+                name: "packed_experts/layout.json",
+                expected: layoutEntry.size,
+                actual: UInt64(layoutData.count))
+        }
+        let weightsSize = try modelDirectory.fileSize(
+            fileDescriptor: weightsFD, relativePath: "model_weights.bin")
+        guard weightsSize == weightsEntry.size else {
+            throw ModelError.tensorSizeMismatch(
+                name: "model_weights.bin",
+                expected: weightsEntry.size,
+                actual: weightsSize)
+        }
         let eagerShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        try Sha256Verifier.verifyFile(at: weightsURL, named: "model_weights.bin",
+        try Sha256Verifier.verifyFile(fileDescriptor: weightsFD,
+                                      named: "model_weights.bin",
                                       expectedHex: weightsEntry.sha256)
-        try Sha256Verifier.verifyFile(at: layoutURL, named: "packed_experts/layout.json",
-                                      expectedHex: layoutEntry.sha256)
+        guard Sha256Verifier.hashData(layoutData).lowercased()
+                == layoutEntry.sha256.lowercased() else {
+            throw ModelError.checksumMismatch(file: "packed_experts/layout.json")
+        }
         stats.eagerSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - eagerShaStart
 
-        let residentIndex = try ResidentIndexReader.load(fileURL: weightsURL)
+        let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
+                                                          manifest: manifest)
+        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
+            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            try validateTrustedReceiptLayerLayout(modelDirectory: modelDirectory,
+                                                  directoryURL: directoryURL,
+                                                  manifest: manifest,
+                                                  layout: layout)
+            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
+        }
+
+        let residentIndex = try ResidentIndexReader.load(
+            fileDescriptor: weightsFD, displayPath: "model_weights.bin")
 
         // The resident index must account for the complete weights file.
-        let attrs = try FileManager.default.attributesOfItem(atPath: weightsURL.path)
-        if let fileSize = attrs[.size] as? UInt64 {
-            let expected = residentIndex.header.indexSize + residentIndex.header.residentSize
-            if fileSize != expected {
-                throw ModelError.indexCorrupt(detail: """
-                    model_weights.bin size \(fileSize) != indexSize \
-                    \(residentIndex.header.indexSize) + residentSize \
-                    \(residentIndex.header.residentSize) = \(expected)
-                    """)
-            }
+        let fileSize = weightsSize
+        let (expectedSize, overflow) = residentIndex.header.indexSize
+            .addingReportingOverflow(residentIndex.header.residentSize)
+        if overflow || fileSize != expectedSize {
+            throw ModelError.indexCorrupt(detail: """
+                model_weights.bin size \(fileSize) != indexSize \
+                \(residentIndex.header.indexSize) + residentSize \
+                \(residentIndex.header.residentSize) = \(expectedSize)
+                """)
         }
 
         let residentBuffer = try ResidentBuffer(
             fileURL: weightsURL,
             fileOffset: residentIndex.header.indexSize,
             residentSize: residentIndex.header.residentSize,
-            device: device)
-
-        let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
-            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try validateTrustedReceiptLayerLayout(directoryURL: directoryURL,
-                                                  manifest: manifest,
-                                                  layout: layout)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
-        }
+            device: device,
+            fileDescriptor: weightsFD)
 
         return Model(
             device: device,
@@ -492,7 +573,8 @@ extension Model {
             residentIndex: residentIndex,
             packedExpertsLayout: layout,
             manifest: manifest,
-            directoryURL: directoryURL)
+            directoryURL: directoryURL,
+            modelDirectory: modelDirectory)
     }
 
     private static func verifyTrustedReceiptFileSize(url: URL,
@@ -523,7 +605,8 @@ extension Model {
         return actualSize
     }
 
-    private static func validateTrustedReceiptLayerLayout(directoryURL: URL,
+    private static func validateTrustedReceiptLayerLayout(modelDirectory: GTurboModelDirectory,
+                                                          directoryURL _: URL,
                                                           manifest: Manifest,
                                                           layout: PackedExpertsLayout) throws {
         let pageSize = UInt64(getpagesize())
@@ -549,10 +632,10 @@ extension Model {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) manifest size \(manifestEntry.size) != \(expectedSize)")
             }
-            let url = directoryURL
-                .appendingPathComponent("packed_experts")
-                .appendingPathComponent(layer.file)
-            let actualSize = try fileSize(at: url, relativePath: relativePath)
+            let fd = try modelDirectory.openFile(relativePath)
+            defer { close(fd) }
+            let actualSize = try modelDirectory.fileSize(
+                fileDescriptor: fd, relativePath: relativePath)
             guard actualSize == expectedSize else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) size \(actualSize) != \(expectedSize)")

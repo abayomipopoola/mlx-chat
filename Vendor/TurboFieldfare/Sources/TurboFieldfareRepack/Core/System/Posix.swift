@@ -192,9 +192,21 @@ public enum Posix {
     }
 
     public static func readBoundedData(_ path: String, maximumBytes: UInt64) throws -> Data {
-        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        try readBoundedData(
+            path, maximumBytes: maximumBytes, followCallerSymlink: false)
+    }
+
+    package static func readBoundedData(_ path: String,
+                                        maximumBytes: UInt64,
+                                        followCallerSymlink: Bool) throws -> Data {
+        let noFollow = followCallerSymlink ? 0 : O_NOFOLLOW
+        let fd = open(path, O_RDONLY | O_NONBLOCK | noFollow | O_CLOEXEC)
         if fd < 0 { throw RepackError.fileOpenFailed(path: path, errno: errno) }
         defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw RepackError.fileStatFailed(path: path, errno: errno == 0 ? EINVAL : errno)
+        }
         let size = try fileSize(fd: fd, path: path)
         guard size <= maximumBytes, size <= UInt64(Int.max) else {
             throw RepackError.installStateCorrupt(

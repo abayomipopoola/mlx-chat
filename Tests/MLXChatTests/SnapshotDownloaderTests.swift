@@ -19,6 +19,15 @@ import Testing
             for: "4bit/model.safetensors", subfolder: "4bit") == "model.safetensors")
     }
 
+    @Test func weightsBelowTheModelRootAreSkipped() {
+        #expect(SnapshotDownloader.localPath(
+            for: "mtp/model.safetensors", subfolder: nil) == nil)
+        #expect(SnapshotDownloader.localPath(
+            for: "4bit/mtp/model.safetensors", subfolder: "4bit") == nil)
+        #expect(SnapshotDownloader.localPath(
+            for: "model.safetensors", subfolder: nil) == "model.safetensors")
+    }
+
     @Test func otherPrecisionsAndUnneededFilesAreSkipped() {
         #expect(SnapshotDownloader.localPath(
             for: "bf16/config.json", subfolder: "4bit") == nil)

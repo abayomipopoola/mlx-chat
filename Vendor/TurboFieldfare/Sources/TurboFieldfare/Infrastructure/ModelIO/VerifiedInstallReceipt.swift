@@ -61,12 +61,17 @@ public enum VerifiedInstallReceiptReader {
                     detail: "\(fileName) size \(size) exceeds metadata cap \(maxBytes)")
             }
             let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(VerifiedInstallReceipt.self, from: data)
+            return try decode(data: data)
         } catch let error as ModelError {
             throw error
         } catch {
             throw ModelError.trustedReceiptInvalid(detail: "\(fileName): \(error)")
         }
+    }
+
+    package static func decode(data: Data) throws -> VerifiedInstallReceipt {
+        do { return try JSONDecoder().decode(VerifiedInstallReceipt.self, from: data) }
+        catch { throw ModelError.trustedReceiptInvalid(detail: "\(fileName): \(error)") }
     }
 
     private static func fileSize(_ url: URL) throws -> UInt64 {

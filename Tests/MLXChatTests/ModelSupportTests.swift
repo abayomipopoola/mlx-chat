@@ -74,11 +74,18 @@ import MLXVLM
     /// Drift guard: the static list must stay in sync with the registries of the
     /// mlx-swift-lm version actually linked (LLM ∪ VLM; update after upgrades).
     @Test func staticListMatchesLLMAndVLMRegistries() async {
+        await PrismHadamardQwen35.register()
         for type in ModelSupport.supportedModelTypes {
             let inLLM = await LLMTypeRegistry.shared.contains(type)
             let inVLM = await VLMTypeRegistry.shared.contains(type)
             #expect(inLLM || inVLM, "\(type) is not registered in LLMTypeRegistry or VLMTypeRegistry")
         }
+    }
+
+    @Test func bonsai2TernaryPackIsLoadableAndVisionCapable() {
+        let config = #"{"model_type":"prism_hadamard_qwen35","quantization":{"bits":2,"group_size":128,"mode":"affine"},"vision_config":{"hidden_size":1152}}"#
+        #expect(ModelSupport.unsupportedReason(configJSON: json(config)) == nil)
+        #expect(ModelSupport.visionCapable(configJSON: json(config)))
     }
 
     @Test func visionCapableWhenVisionConfigPresent() {

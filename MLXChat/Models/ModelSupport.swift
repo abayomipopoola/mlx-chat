@@ -31,6 +31,8 @@ enum ModelSupport {
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
+        // Registered by the app (PrismHadamardQwen35), not by mlx-swift-lm.
+        "prism_hadamard_qwen35",
         "minicpm",
         "starcoder2",
         "cohere",

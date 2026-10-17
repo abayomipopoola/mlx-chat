@@ -91,6 +91,25 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         installRestriction = try c.decodeIfPresent(String.self, forKey: .installRestriction)
     }
 
+    func withSupportsVision(_ value: Bool) -> CatalogModel {
+        guard value != supportsVision else { return self }
+        return CatalogModel(
+            id: id,
+            displayName: displayName,
+            sizeGB: sizeGB,
+            ctxTokens: ctxTokens,
+            quantLabel: quantLabel,
+            category: category,
+            blurb: blurb,
+            extraEOSTokens: extraEOSTokens,
+            thinking: thinking,
+            supportsVision: value,
+            backend: backend,
+            sourceSubfolder: sourceSubfolder,
+            sourceRepoID: sourceRepoID,
+            installRestriction: installRestriction)
+    }
+
     var huggingFaceRepoID: String { sourceRepoID ?? id }
 
     var hugginFaceURL: URL {
@@ -191,6 +210,10 @@ enum ModelCatalog {
             blurb: "Ornith 1.5 Qwen 3.5 family models with thinking mode and 256K context. The 35B-A3B MoE can use standard MLX or SSD streaming.",
             badges: [.new, .thinking]),
         ModelFamily(
+            id: "bonsai", name: "Bonsai 2", icon: "leaf",
+            blurb: "PrismML's ternary Qwen models. Close to full-precision quality in a fraction of the memory, with thinking mode, vision, and 256K context.",
+            badges: [.new, .thinking, .vision]),
+        ModelFamily(
             id: "gemma4", name: "Gemma 4", icon: "bubble.left.and.bubble.right",
             blurb: "The latest generation of open models from Google. Optimized for multi-turn chat and advanced reasoning, with 256K context.",
             badges: [.new, .recommended, .vision]),
@@ -240,6 +263,7 @@ enum ModelCatalog {
         if name.hasPrefix("Qwen3.6") { return "qwen36" }
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
         if name.hasPrefix("Ornith") { return "ornith" }
+        if name.hasPrefix("Bonsai") { return "bonsai" }
         if name.hasPrefix("Qwen3") { return "qwen3" }
         if name.hasPrefix("Qwen2.5 VL") { return "qwen25vl" }
         if name.hasPrefix("Qwen2.5 Coder") { return "coder" }
@@ -363,6 +387,20 @@ enum ModelCatalog {
             thinking: .thinkTags(startsInside: true, toggleable: true),
             backend: .streamedMoE),
         CatalogModel(
+            id: "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit", displayName: "Bonsai 2 9B",
+            sizeGB: 3.46, ctxTokens: 262_144, quantLabel: "Ternary 2-bit", category: .general,
+            blurb: "Ternary Qwen 3.5 9B with vision. About a fifth of the full-precision size.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            supportsVision: true),
+        CatalogModel(
+            id: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit", displayName: "Bonsai 2 27B",
+            sizeGB: 8.60, ctxTokens: 262_144, quantLabel: "Ternary 2-bit", category: .general,
+            blurb: "Ternary Qwen3.8 27B with vision. Large-model reasoning in under 9 GB.",
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"],
+            thinking: .thinkTags(startsInside: true, toggleable: true),
+            supportsVision: true),
+        CatalogModel(
             id: "mlx-community/Qwen3-4B-4bit", displayName: "Qwen3 4B",
             sizeGB: 2.26, ctxTokens: 40_960, quantLabel: "4-bit", category: .general,
             blurb: "Solid general model with thinking mode.",
@@ -482,9 +520,10 @@ enum ModelCatalog {
             thinking = .thinkTags(startsInside: true, toggleable: true)
         } else if let type = modelType(from: configJSON),
                   let inferred = thinkingConfig(forModelType: type) {
-            let usesLongContext = type.hasPrefix("qwen3_5") || type.hasPrefix("gemma4")
+            let isPrism = type == PrismHadamardQwen35.modelType
+            let usesLongContext = isPrism || type.hasPrefix("qwen3_5") || type.hasPrefix("gemma4")
             contextTokens = usesLongContext ? max(model.ctxTokens, 262_144) : model.ctxTokens
-            extraEOSTokens = ["<|im_end|>"]
+            extraEOSTokens = isPrism ? ["<|im_end|>", "<|endoftext|>"] : ["<|im_end|>"]
             thinking = inferred
         } else {
             return model
@@ -515,7 +554,7 @@ enum ModelCatalog {
 
     static func thinkingConfig(forModelType type: String) -> ThinkingConfig? {
         switch type {
-        case "qwen3_5", "qwen3_5_moe", "qwen3_5_text":
+        case "qwen3_5", "qwen3_5_moe", "qwen3_5_text", PrismHadamardQwen35.modelType:
             return .thinkTags(startsInside: true, toggleable: true)
         case "qwen3", "qwen3_moe":
             return .thinkTags(toggleable: true)

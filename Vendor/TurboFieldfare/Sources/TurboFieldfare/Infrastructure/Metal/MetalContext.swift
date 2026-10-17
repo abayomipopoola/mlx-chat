@@ -19,6 +19,10 @@ enum MetalError: Error, CustomStringConvertible {
     }
 }
 
+func checkCommandBufferError(_ error: (any Error)?) throws {
+    if let error { throw error }
+}
+
 public struct MetalFunctionConstant: Hashable, Sendable {
     public enum Value: Hashable, Sendable {
         case bool(Bool)
@@ -51,6 +55,7 @@ public final class MetalContext: @unchecked Sendable {
         var name: String
         var constants: [MetalFunctionConstant]
         var maxTotalThreadsPerThreadgroup: Int?
+        var module: String?
     }
 
     private var pipelineCache: [PipelineCacheKey: MTLComputePipelineState] = [:]
@@ -93,6 +98,9 @@ public final class MetalContext: @unchecked Sendable {
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",
         "utility": "Metal/Primitives",
+        "vision": "Metal/Vision",
+        "vision_register_gemm": "Metal/Vision",
+        "vision_resize": "Metal/Vision",
     ]
 
     private static func shaderURL(module: String) -> URL? {
@@ -122,21 +130,78 @@ public final class MetalContext: @unchecked Sendable {
 
     /// Compile a shader module separately from the shared runtime library.
     public static func moduleLibrary(device: MTLDevice, module: String) throws -> MTLLibrary {
+        try privateLibrary(device: device, module: module)
+    }
+
+    /// Compile one shader module into its own library, leaving the shared
+    /// runtime library untouched.
+    ///
+    /// Cached per device, module, math mode and source variant: libraries are
+    /// immutable, and one `VisionRuntime` init otherwise compiles the identical
+    /// tensorops source three times (linear, attention, projector) on every load.
+    public static func privateLibrary(device: MTLDevice, module: String,
+                                      mathMode: MTLMathMode? = nil,
+                                      includeVisionTensorOps: Bool = false) throws
+        -> MTLLibrary {
+        let key = "\(ObjectIdentifier(device).hashValue)#\(module)"
+            + "#\(mathMode?.rawValue ?? -1)#\(includeVisionTensorOps)"
+        privateLibraryLock.lock()
+        defer { privateLibraryLock.unlock() }
+        if let cached = privateLibraryCache[key] {
+            return cached
+        }
         guard let url = shaderURL(module: module) else {
             throw MetalError.missingShaderResource(module)
         }
         let src = try String(contentsOf: url, encoding: .utf8)
         let opts = MTLCompileOptions()
         opts.languageVersion = .version4_0
+        if let mathMode {
+            opts.mathMode = mathMode
+        }
+        if includeVisionTensorOps {
+            opts.preprocessorMacros = [
+                "TURBO_FIELDFARE_VISION_TENSOROPS": NSNumber(value: true)
+            ]
+        }
         do {
-            return try device.makeLibrary(source: src, options: opts)
+            let library = try device.makeLibrary(source: src, options: opts)
+            privateLibraryCache[key] = library
+            return library
         } catch {
             throw MetalError.libraryCompileFailed("\(error)")
         }
     }
 
+    private static let privateLibraryLock = NSLock()
+    private static nonisolated(unsafe) var privateLibraryCache: [String: MTLLibrary] = [:]
+
     public func pipeline(_ name: String) throws -> MTLComputePipelineState {
         try pipeline(name, constants: [])
+    }
+
+    public func pipeline(_ name: String, privateModule module: String) throws -> MTLComputePipelineState {
+        let key = PipelineCacheKey(name: name,
+                                   constants: [],
+                                   maxTotalThreadsPerThreadgroup: nil,
+                                   module: module)
+        pipelineCacheLock.lock()
+        let cached = pipelineCache[key]
+        pipelineCacheLock.unlock()
+        if let cached { return cached }
+
+        let library = try Self.privateLibrary(device: device, module: module)
+        guard library.functionNames.contains(name) else {
+            throw MetalError.missingFunction(name)
+        }
+        guard let fn = library.makeFunction(name: name) else {
+            throw MetalError.missingFunction(name)
+        }
+        let p = try device.makeComputePipelineState(function: fn)
+        pipelineCacheLock.lock()
+        pipelineCache[key] = p
+        pipelineCacheLock.unlock()
+        return p
     }
 
     public func pipeline(_ name: String,

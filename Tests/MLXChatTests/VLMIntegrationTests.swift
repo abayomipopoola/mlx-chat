@@ -157,6 +157,44 @@ struct VLMIntegrationTests {
             "reply did not mention 4: \(content.prefix(200))")
     }
 
+    @Test(.timeLimit(.minutes(20)))
+    func ssdGemma4QATAnswersAboutImageThroughVisionPack() async throws {
+        let variant = StreamedMoEInstall.qat
+        let directory = variant.managedDirectory
+        guard StreamedMoEInstall.validationError(at: directory, for: variant) == nil,
+              StreamedMoEInstall.visionCompanionLooksPresent(beside: directory) else {
+            print("Skipping SSD vision test: no verified \(directory.lastPathComponent) with a vision pack")
+            return
+        }
+
+        let jpeg = try #require(Self.redCircleOnWhiteJPEG())
+        let model = try #require(ModelCatalog.model(for: variant.modelID))
+        let engine = StreamedMoEEngine(model: model, modelDirectory: directory)
+        try await engine.load(progress: { _ in })
+        defer { engine.unload() }
+
+        var content = ""
+        let history = [
+            EngineMessage(
+                role: .user,
+                text: "What color is the circle in this image? Answer with a single word.",
+                images: [jpeg])
+        ]
+        for try await event in engine.stream(
+            history: history,
+            systemPrompt: "You are a helpful assistant.",
+            temperature: 0,
+            conversationID: UUID()
+        ) {
+            if case .delta(let delta) = event { content += delta }
+        }
+
+        #expect(
+            content.lowercased().contains("red"),
+            "reply did not mention red: \(content.prefix(200))")
+        print("SSD Gemma 4 QAT vision passed: \(content.prefix(80))")
+    }
+
     /// Solid red 512×512 JPEG for VLM color-recognition smoke tests.
     private static func solidRedJPEG() -> Data? {
         let size = NSSize(width: 512, height: 512)

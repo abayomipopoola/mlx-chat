@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import MLXChat
@@ -75,6 +76,71 @@ struct EngineIntegrationTests {
         for model in models {
             try await verifyModelGenerates(model)
         }
+    }
+
+    /// Opt-in because this downloads the 3.46 GB Bonsai 2 9B pack. Run with
+    /// `MLXCHAT_RUN_BONSAI_SMOKE=1` before shipping changes to the Prism Hadamard loader.
+    /// Unrotated activations still decode, but into nonsense, so the bar is a correct answer.
+    @Test(.timeLimit(.minutes(60)))
+    func downloadsLoadsAndAnswersWithBonsai2Ternary() async throws {
+        guard ProcessInfo.processInfo.environment["MLXCHAT_RUN_BONSAI_SMOKE"] == "1" else {
+            return
+        }
+        let model = try #require(
+            ModelCatalog.model(for: "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit"))
+        let store = await ModelStore()
+        try await store.downloadAndWait(model.id)
+        let directory = try #require(ModelStore.localMLXModelDirectory(for: model.id))
+        #expect(!FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("mtp/model.safetensors").path))
+
+        let defaults = UserDefaults.standard
+        let savedThinking = defaults.object(forKey: Keys.thinkingEnabled)
+        defaults.set(false, forKey: Keys.thinkingEnabled)
+        defer { defaults.set(savedThinking, forKey: Keys.thinkingEnabled) }
+
+        let engine = MLXEngine(model: model)
+        try await engine.load { _ in }
+        defer { engine.unload() }
+
+        let sum = try await reply(
+            from: engine, to: "What is 17 plus 25? Answer with the number only.")
+        #expect(sum.contains("42"), "Bonsai 2 answered: \(sum.prefix(200))")
+
+        let circle = try #require(Self.redCircleOnWhiteJPEG())
+        let color = try await reply(
+            from: engine,
+            to: "What color is the circle in this image? Answer with a single word.",
+            images: [circle])
+        #expect(color.lowercased().contains("red"), "Bonsai 2 answered: \(color.prefix(200))")
+        print("Bonsai 2 smoke passed: \(sum.prefix(40)) | \(color.prefix(40))")
+    }
+
+    private func reply(
+        from engine: MLXEngine, to prompt: String, images: [Data] = []
+    ) async throws -> String {
+        var content = ""
+        for try await event in engine.stream(
+            history: [EngineMessage(role: .user, text: prompt, images: images)],
+            systemPrompt: "You are a helpful assistant",
+            temperature: 0,
+            conversationID: UUID()
+        ) {
+            if case .delta(let delta) = event { content += delta }
+        }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func redCircleOnWhiteJPEG() -> Data? {
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 128, y: 128, width: 256, height: 256)).fill()
+        image.unlockFocus()
+        return AttachmentImage.jpegData(from: image)
     }
 
     private func verifyModelGenerates(_ model: CatalogModel) async throws {

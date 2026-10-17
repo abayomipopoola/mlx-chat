@@ -1,8 +1,14 @@
 import Foundation
+import TurboFieldfareFormat
 
 public struct ManifestFileEntry: Decodable, Equatable, Sendable {
     public let size: UInt64
     public let sha256: String
+
+    public init(size: UInt64, sha256: String) {
+        self.size = size
+        self.sha256 = sha256
+    }
 }
 
 public struct ManifestArch: Decodable, Equatable, Sendable {
@@ -43,6 +49,78 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let linearKeyHeadDim: Int?
     public let linearValueHeadDim: Int?
     public let linearConvKernelSize: Int?
+
+    public init(
+        hiddenSize: Int,
+        ffnIntermediate: Int,
+        moeIntermediateSize: Int,
+        numHeads: Int,
+        numKVHeads: Int,
+        numFullKVHeads: Int,
+        headDim: Int,
+        fullHeadDim: Int,
+        vocabSize: Int,
+        slidingWindow: Int,
+        finalLogitSoftcap: Double,
+        ropeTheta: Double,
+        fullRopeTheta: Double,
+        partialRotaryFactor: Double,
+        numLayers: Int,
+        numExperts: Int,
+        topKExperts: Int,
+        tieWordEmbeddings: Bool,
+        attentionKEqV: Bool,
+        hiddenActivation: String,
+        fullAttentionLayerMask: [Int],
+        family: String? = nil,
+        attnOutputGate: Bool? = nil,
+        attentionScale: Double? = nil,
+        embeddingScaledBySqrtHidden: Bool? = nil,
+        routerScaled: Bool? = nil,
+        ffnSandwichNorms: Bool? = nil,
+        sharedExpertGated: Bool? = nil,
+        ropeNeoxSubdim: Bool? = nil,
+        linearNumKHeads: Int? = nil,
+        linearNumVHeads: Int? = nil,
+        linearKeyHeadDim: Int? = nil,
+        linearValueHeadDim: Int? = nil,
+        linearConvKernelSize: Int? = nil
+    ) {
+        self.hiddenSize = hiddenSize
+        self.ffnIntermediate = ffnIntermediate
+        self.moeIntermediateSize = moeIntermediateSize
+        self.numHeads = numHeads
+        self.numKVHeads = numKVHeads
+        self.numFullKVHeads = numFullKVHeads
+        self.headDim = headDim
+        self.fullHeadDim = fullHeadDim
+        self.vocabSize = vocabSize
+        self.slidingWindow = slidingWindow
+        self.finalLogitSoftcap = finalLogitSoftcap
+        self.ropeTheta = ropeTheta
+        self.fullRopeTheta = fullRopeTheta
+        self.partialRotaryFactor = partialRotaryFactor
+        self.numLayers = numLayers
+        self.numExperts = numExperts
+        self.topKExperts = topKExperts
+        self.tieWordEmbeddings = tieWordEmbeddings
+        self.attentionKEqV = attentionKEqV
+        self.hiddenActivation = hiddenActivation
+        self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.family = family
+        self.attnOutputGate = attnOutputGate
+        self.attentionScale = attentionScale
+        self.embeddingScaledBySqrtHidden = embeddingScaledBySqrtHidden
+        self.routerScaled = routerScaled
+        self.ffnSandwichNorms = ffnSandwichNorms
+        self.sharedExpertGated = sharedExpertGated
+        self.ropeNeoxSubdim = ropeNeoxSubdim
+        self.linearNumKHeads = linearNumKHeads
+        self.linearNumVHeads = linearNumVHeads
+        self.linearKeyHeadDim = linearKeyHeadDim
+        self.linearValueHeadDim = linearValueHeadDim
+        self.linearConvKernelSize = linearConvKernelSize
+    }
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -51,6 +129,15 @@ public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
     public let scaleType: String
     public let biasType: String
     public let groupSize: Int
+
+    public init(weightBits: Int, scheme: String, scaleType: String,
+                biasType: String, groupSize: Int) {
+        self.weightBits = weightBits
+        self.scheme = scheme
+        self.scaleType = scaleType
+        self.biasType = biasType
+        self.groupSize = groupSize
+    }
 }
 
 public struct ManifestQuant: Decodable, Equatable, Sendable {
@@ -59,6 +146,18 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let router: ManifestQuantSlot
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
+
+    public init(embedding: ManifestQuantSlot,
+                attention: ManifestQuantSlot,
+                router: ManifestQuantSlot,
+                sharedExpert: ManifestQuantSlot,
+                routedExpert: ManifestQuantSlot) {
+        self.embedding = embedding
+        self.attention = attention
+        self.router = router
+        self.sharedExpert = sharedExpert
+        self.routedExpert = routedExpert
+    }
 }
 
 public struct Manifest: Decodable, Equatable, Sendable {
@@ -74,15 +173,41 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let expertsPerLayer: Int
     public let numLayers: Int
     public let expertStride: UInt64
+
+    public init(
+        magic: String,
+        versionMajor: Int,
+        versionMinor: Int,
+        flags: [String: Bool],
+        modelID: String,
+        sourceSnapshotHash: String?,
+        arch: ManifestArch,
+        quant: ManifestQuant?,
+        files: [String: ManifestFileEntry],
+        expertsPerLayer: Int,
+        numLayers: Int,
+        expertStride: UInt64
+    ) {
+        self.magic = magic
+        self.versionMajor = versionMajor
+        self.versionMinor = versionMinor
+        self.flags = flags
+        self.modelID = modelID
+        self.sourceSnapshotHash = sourceSnapshotHash
+        self.arch = arch
+        self.quant = quant
+        self.files = files
+        self.expertsPerLayer = expertsPerLayer
+        self.numLayers = numLayers
+        self.expertStride = expertStride
+    }
 }
 
 public enum ManifestReader {
     public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
 
     /// Recognized flag keys. Anything else in `manifest.flags` is an error.
-    public static let knownFlags: Set<String> = [
-        "streamingPresent", "turboQuantKV", "aneSharedExpert"
-    ]
+    public static let knownFlags: Set<String> = GTurboFormatV1.knownFlags
 
     /// Required file entries (relative to `model.gturbo/`). Layer files
     /// `packed_experts/layer_<L>.bin` for L in 0..<numLayers are checked
@@ -97,49 +222,80 @@ public enum ManifestReader {
     public static func load(directoryURL: URL,
                             expecting: ArchConfig,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> Manifest {
-        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+        let data: Data
+        do {
+            let directory = try GTurboModelDirectory(rootURL: directoryURL)
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
-        let size = try metadataFileSize(manifestURL, fileName: "manifest.json")
-        guard size <= maxBytes else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.json size \(size) exceeds metadata cap \(maxBytes)")
+        return try decode(data: data, expecting: expecting)
+    }
+
+    package static func decode(data: Data,
+                               expecting: ArchConfig) throws -> Manifest {
+        let manifest: Manifest
+        do {
+            manifest = try decodeV1(data)
+        } catch {
+            // Dual-read: pre-#87 installs share the same JSON versionMajor=1
+            // but may fail the new structural checks. Fall back to the
+            // previous decoder so existing text-only directories still open.
+            do {
+                manifest = try decodeLegacy(data)
+            } catch let legacy as ModelError {
+                throw legacy
+            } catch {
+                throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
+            }
         }
-        let data = try Data(contentsOf: manifestURL)
+        try validate(manifest, against: expecting, directoryURL: nil)
+        return manifest
+    }
+
+    private static func decodeV1(_ data: Data) throws -> Manifest {
+        let wire = try GTurboManifestCodec.decodeUnchecked(data)
+        guard wire.magic == GTurboFormatV1.magic else {
+            throw ModelError.notAGTurboDirectory
+        }
+        guard wire.versionMajor == GTurboFormatV1.versionMajor,
+              wire.versionMinor >= 0 else {
+            throw ModelError.unsupportedVersion(major: wire.versionMajor,
+                                                minor: wire.versionMinor)
+        }
+        for key in wire.flags.keys where !GTurboFormatV1.knownFlags.contains(key) {
+            throw ModelError.unknownFlag(name: key)
+        }
+        if wire.expertStride % GTurboFormatV1.alignmentBytes != 0 {
+            throw ModelError.expertStrideNotPageAligned(
+                stride: wire.expertStride,
+                pageSize: Int(GTurboFormatV1.alignmentBytes))
+        }
+        try GTurboManifestCodec.validate(wire)
+        return Manifest(wire: wire)
+    }
+
+    private static func decodeLegacy(_ data: Data) throws -> Manifest {
         let manifest: Manifest
         do {
             manifest = try JSONDecoder().decode(Manifest.self, from: data)
         } catch {
             throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
         }
-
-        try validate(manifest, against: expecting,
-                     directoryURL: directoryURL)
-        return manifest
-    }
-
-    private static func metadataFileSize(_ url: URL,
-                                         fileName: String) throws -> UInt64 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let number = attrs[.size] as? NSNumber else {
-            throw ModelError.indexCorrupt(detail: "\(fileName): file size unavailable")
+        guard manifest.magic == "GTURBO" else { throw ModelError.notAGTurboDirectory }
+        guard manifest.versionMajor == 1 else {
+            throw ModelError.unsupportedVersion(major: manifest.versionMajor,
+                                                minor: manifest.versionMinor)
         }
-        return number.uint64Value
+        for key in manifest.flags.keys where !knownFlags.contains(key) {
+            throw ModelError.unknownFlag(name: key)
+        }
+        return manifest
     }
 
     static func validate(_ m: Manifest,
                          against expected: ArchConfig,
-                         directoryURL: URL) throws {
-        guard m.magic == "GTURBO" else { throw ModelError.notAGTurboDirectory }
-        guard m.versionMajor == 1 else {
-            throw ModelError.unsupportedVersion(major: m.versionMajor, minor: m.versionMinor)
-        }
-        for key in m.flags.keys {
-            if !knownFlags.contains(key) {
-                throw ModelError.unknownFlag(name: key)
-            }
-        }
+                         directoryURL: URL?) throws {
         if m.flags["turboQuantKV"] == true {
             throw ModelError.indexCorrupt(
                 detail: "manifest requests removed TurboQuant KV runtime support")
@@ -275,16 +431,20 @@ public enum ManifestReader {
     /// without arch validation. Used by `Model.load` auto-detection.
     public static func peekFamily(directoryURL: URL,
                                   maxBytes: UInt64 = defaultMaxBytes) throws -> ModelFamily {
-        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+        let data: Data
+        do {
+            let directory = try GTurboModelDirectory(rootURL: directoryURL)
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
-        let size = try metadataFileSize(manifestURL, fileName: "manifest.json")
-        guard size <= maxBytes else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.json size \(size) exceeds metadata cap \(maxBytes)")
+        if let wire = try? GTurboManifestCodec.decodeUnchecked(data),
+           let raw = wire.arch.family {
+            guard let family = ModelFamily(rawValue: raw) else {
+                throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(raw)\"")
+            }
+            return family
         }
-        let data = try Data(contentsOf: manifestURL)
         let manifest: Manifest
         do {
             manifest = try JSONDecoder().decode(Manifest.self, from: data)
@@ -296,5 +456,85 @@ public enum ManifestReader {
             throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(raw)\"")
         }
         return family
+    }
+}
+
+private extension ManifestFileEntry {
+    init(wire: GTurboManifestFileV1) {
+        self.init(size: wire.size, sha256: wire.sha256)
+    }
+}
+
+private extension ManifestArch {
+    init(wire: GTurboManifestArchV1) {
+        self.init(hiddenSize: wire.hiddenSize,
+                  ffnIntermediate: wire.ffnIntermediate,
+                  moeIntermediateSize: wire.moeIntermediateSize,
+                  numHeads: wire.numHeads,
+                  numKVHeads: wire.numKVHeads,
+                  numFullKVHeads: wire.numFullKVHeads,
+                  headDim: wire.headDim,
+                  fullHeadDim: wire.fullHeadDim,
+                  vocabSize: wire.vocabSize,
+                  slidingWindow: wire.slidingWindow,
+                  finalLogitSoftcap: wire.finalLogitSoftcap,
+                  ropeTheta: wire.ropeTheta,
+                  fullRopeTheta: wire.fullRopeTheta,
+                  partialRotaryFactor: wire.partialRotaryFactor,
+                  numLayers: wire.numLayers,
+                  numExperts: wire.numExperts,
+                  topKExperts: wire.topKExperts,
+                  tieWordEmbeddings: wire.tieWordEmbeddings,
+                  attentionKEqV: wire.attentionKEqV,
+                  hiddenActivation: wire.hiddenActivation,
+                  fullAttentionLayerMask: wire.fullAttentionLayerMask,
+                  family: wire.family,
+                  attnOutputGate: wire.attnOutputGate,
+                  attentionScale: wire.attentionScale,
+                  embeddingScaledBySqrtHidden: wire.embeddingScaledBySqrtHidden,
+                  routerScaled: wire.routerScaled,
+                  ffnSandwichNorms: wire.ffnSandwichNorms,
+                  sharedExpertGated: wire.sharedExpertGated,
+                  ropeNeoxSubdim: wire.ropeNeoxSubdim,
+                  linearNumKHeads: wire.linearNumKHeads,
+                  linearNumVHeads: wire.linearNumVHeads,
+                  linearKeyHeadDim: wire.linearKeyHeadDim,
+                  linearValueHeadDim: wire.linearValueHeadDim,
+                  linearConvKernelSize: wire.linearConvKernelSize)
+    }
+}
+
+private extension ManifestQuantSlot {
+    init(wire: GTurboManifestQuantSlotV1) {
+        self.init(weightBits: wire.weightBits, scheme: wire.scheme,
+                  scaleType: wire.scaleType, biasType: wire.biasType,
+                  groupSize: wire.groupSize)
+    }
+}
+
+private extension ManifestQuant {
+    init(wire: GTurboManifestQuantV1) {
+        self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
+                  attention: ManifestQuantSlot(wire: wire.attention),
+                  router: ManifestQuantSlot(wire: wire.router),
+                  sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
+                  routedExpert: ManifestQuantSlot(wire: wire.routedExpert))
+    }
+}
+
+private extension Manifest {
+    init(wire: GTurboManifestV1) {
+        self.init(magic: wire.magic,
+                  versionMajor: wire.versionMajor,
+                  versionMinor: wire.versionMinor,
+                  flags: wire.flags,
+                  modelID: wire.modelID,
+                  sourceSnapshotHash: wire.sourceSnapshotHash,
+                  arch: ManifestArch(wire: wire.arch),
+                  quant: wire.quant.map(ManifestQuant.init(wire:)),
+                  files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
+                  expertsPerLayer: wire.expertsPerLayer,
+                  numLayers: wire.numLayers,
+                  expertStride: wire.expertStride)
     }
 }

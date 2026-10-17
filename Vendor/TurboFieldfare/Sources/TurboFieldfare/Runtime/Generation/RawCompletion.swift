@@ -82,6 +82,7 @@ extension GenerationConfig {
 public func runRawCompletion(producer: any LogitProducer,
                              tokenizer: GFTokenizer,
                              promptIds: [Int32],
+                             multimodalInput: MultimodalPrefillInput? = nil,
                              config: GenerationConfig,
                              context: MetalContext,
                              scratch: RawCompletionScratch,
@@ -115,9 +116,15 @@ public func runRawCompletion(producer: any LogitProducer,
         }
         cachedPromptTokens = count
     }
+    // Image spans only run on the chunked multimodal path. Prefill mode is a
+    // performance choice; whether images work at all is not, so coerce.
+    let prefillConfig = multimodalInput == nil
+        ? prefillConfig
+        : (prefillConfig.coercedForImagePrompt() ?? prefillConfig)
     let computedPrefillTokens = promptIds.count - cachedPromptTokens
 
-    var detok = GFDetokenizer(tokenizer: tokenizer)
+    var detok = GFDetokenizer(tokenizer: tokenizer,
+                              barrierTokenIDs: tokenizer.structuralMarkerIDs)
     var history = Array(promptIds.prefix(cachedPromptTokens))
     history.reserveCapacity(promptIds.count + config.maxNewTokens)
 
@@ -138,8 +145,35 @@ public func runRawCompletion(producer: any LogitProducer,
     var position = cachedPromptTokens
     var prefillSeed: PrefillSeed?
     let prefillTokens = promptIds[cachedPromptTokens...]
-    switch prefillConfig.mode {
-    case .chunked where producer is any ChunkedPrefillRunner:
+    switch (multimodalInput, prefillConfig.mode) {
+    case (.some(let input), .chunked) where producer is any MultimodalPrefillRunner:
+        let multimodal = producer as! any MultimodalPrefillRunner
+        let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
+        let result = try await multimodal.prefillMultimodal(
+            input: input,
+            startPosition: position,
+            outputMode: mode,
+            config: prefillConfig,
+            into: scratch.logits
+        ) { done in
+            onProgress(.prefill(done: cachedPromptTokens + done,
+                                total: promptIds.count))
+        }
+        if mode == .logits, result.seed != .logitsWritten {
+            throw PrefillError.unsupportedPrefillSeed(
+                "RawCompletion multimodal prefill requested logits but producer returned \(result.seed)")
+        }
+        if case .greedyToken = result.seed, !config.isPureGreedy {
+            throw PrefillError.unsupportedPrefillSeed(
+                "RawCompletion multimodal prefill returned a greedy token for a sampling config")
+        }
+        position = result.newPosition
+        prefillSeed = result.seed
+        history.append(contentsOf: prefillTokens)
+    case (.some, _):
+        throw PrefillError.chunkedUnsupported(
+            "multimodal prefill requires a MultimodalPrefillRunner-backed runtime")
+    case (.none, .chunked) where producer is any ChunkedPrefillRunner:
         let chunked = producer as! any ChunkedPrefillRunner
         let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
         let result = try await chunked.prefillChunked(tokens: prefillTokens,
@@ -160,10 +194,10 @@ public func runRawCompletion(producer: any LogitProducer,
         position = result.newPosition
         prefillSeed = result.seed
         history.append(contentsOf: prefillTokens)
-    case .chunked:
+    case (.none, .chunked):
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
-    case .off:
+    case (.none, .off):
         for t in prefillTokens {
             try Task.checkCancellation()
             try await producer.produce(token: t, position: position, into: scratch.logits)
@@ -189,14 +223,14 @@ public func runRawCompletion(producer: any LogitProducer,
             case .greedyToken(let token):
                 tokenID = Int32(bitPattern: token)
             case .logitsWritten:
-                tokenID = sampleOnce(scratch: scratch, context: context,
-                                     history: history, config: config, position: generated)
+                tokenID = try sampleOnce(scratch: scratch, context: context,
+                                         history: history, config: config, position: generated)
             }
         } else if fusedGreedy {
             tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
         } else {
-            tokenID = sampleOnce(scratch: scratch, context: context,
-                                 history: history, config: config, position: generated)
+            tokenID = try sampleOnce(scratch: scratch, context: context,
+                                     history: history, config: config, position: generated)
         }
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
@@ -246,11 +280,12 @@ public func runRawCompletion(producer: any LogitProducer,
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
-                        history: [Int32], config: GenerationConfig, position: Int) -> Int32 {
+                        history: [Int32], config: GenerationConfig, position: Int) throws -> Int32 {
     let cb = context.queue.makeCommandBuffer()!
     scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits, probs: scratch.probs,
                            history: history, config: config, position: position,
                            outToken: scratch.outToken)
     cb.commit(); cb.waitUntilCompleted()
+    try checkCommandBufferError(cb.error)
     return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
 }

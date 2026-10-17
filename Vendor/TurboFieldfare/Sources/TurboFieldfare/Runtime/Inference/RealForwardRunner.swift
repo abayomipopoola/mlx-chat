@@ -130,7 +130,7 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
+public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
     private struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
@@ -272,7 +272,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxContext: maxContext,
                                      fp16RingEnabled: useFP16Ring,
                                      slidingWindow: cfg.slidingWindow,
-                                     maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens)
+                                     maxPrefillChunkTokens: max(
+                                        PrefillRuntimeConfig.maxChunkTokens,
+                                        VisionConfig().maximumPooledTokens))
 
         let silu = cfg.hiddenActivation == "silu"
         self.embedInt4 = try EmbedLookupInt4(context: context)
@@ -649,9 +651,91 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              seed: .logitsWritten)
     }
 
+    public func prefillMultimodal(input: MultimodalPrefillInput,
+                                  startPosition: Int,
+                                  outputMode: PrefillOutputMode,
+                                  config: PrefillRuntimeConfig,
+                                  into logits: MTLBuffer,
+                                  onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try prefillChunkState.requireClean(operation: "prefillMultimodal")
+        guard config.servesImagePrompt else {
+            throw PrefillError.chunkedUnsupported(
+                "multimodal prefill requires the complete chunked prefill path")
+        }
+        let tokens = input.embeddingTokenIDs
+        guard startPosition >= 0,
+              startPosition + tokens.count <= maxContext else {
+            throw PrefillError.chunkedUnsupported(
+                "multimodal prefill range exceeds maxContext \(maxContext)")
+        }
+        let kvPosition = kv?.position ?? 0
+        guard kvPosition == startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "multimodal prefill cursor \(kvPosition) != startPosition \(startPosition)")
+        }
+        guard !tokens.isEmpty else {
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+
+        let textChunkTokens = min(config.chunkTokens, PrefillRuntimeConfig.maxChunkTokens)
+        let work = PrefillChunkPlanner.multimodalWork(
+            tokenCount: tokens.count,
+            imageRanges: input.imageSpans.map(\.tokenRange),
+            chunkTokens: config.chunkTokens)
+        let imageBuffers = input.imageSpans.map(\.features.buffer)
+
+        let pooledTokens = VisionConfig().maximumPooledTokens
+        let hasImages = work.contains(where: \.isImage)
+        let layoutTokens = hasImages
+            ? max(config.chunkTokens, pooledTokens)
+            : config.chunkTokens
+        let layoutLimit = hasImages
+            ? max(PrefillRuntimeConfig.maxChunkTokens, pooledTokens)
+            : PrefillRuntimeConfig.maxChunkTokens
+        let scratch = try ensurePrefillScratch(
+            config: config.replacingChunkTokens(layoutTokens),
+            chunkTokenLimit: layoutLimit)
+
+        var completed = 0
+        for (index, item) in work.enumerated() {
+            try Task.checkCancellation()
+            let isImage = item.isImage
+            let imageFeatures = item.imageIndex.map { imageBuffers[$0] }
+            let chunkConfig = config.replacingChunkTokens(
+                isImage ? item.range.count : textChunkTokens)
+            let lower = tokens.index(tokens.startIndex, offsetBy: item.range.lowerBound)
+            let upper = tokens.index(tokens.startIndex, offsetBy: item.range.upperBound)
+            try await executePrefillChunk(
+                tokens: tokens[lower..<upper],
+                startPosition: startPosition + item.range.lowerBound,
+                outputMode: outputMode,
+                logits: logits,
+                scratch: scratch,
+                config: chunkConfig,
+                writeFinalHead: index == work.count - 1,
+                embeddingOverride: imageFeatures,
+                bidirectionalBlock: isImage
+                    ? (startPosition + item.range.lowerBound)..<(startPosition + item.range.upperBound)
+                    : nil)
+            completed += item.range.count
+            onProgress(completed)
+        }
+        if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            return PrefillResult(newPosition: startPosition + tokens.count,
+                                 seed: .greedyToken(lastGreedyToken))
+        }
+        return PrefillResult(newPosition: startPosition + tokens.count,
+                             seed: .logitsWritten)
+    }
+
     @discardableResult
-    private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
-        let layout = PrefillChunkScratchLayout(config: cfg, runtime: config)
+    private func ensurePrefillScratch(
+        config: PrefillRuntimeConfig,
+        chunkTokenLimit: Int = PrefillRuntimeConfig.maxChunkTokens
+    ) throws -> PrefillChunkScratchBuffers {
+        let layout = PrefillChunkScratchLayout(config: cfg,
+                                               chunkTokens: config.chunkTokens,
+                                               chunkTokenLimit: chunkTokenLimit)
         if let scratch = prefillScratch, scratch.layout == layout {
             return scratch
         }
@@ -666,7 +750,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      logits: MTLBuffer,
                                      scratch: PrefillChunkScratchBuffers,
                                      config: PrefillRuntimeConfig,
-                                     writeFinalHead: Bool) async throws {
+                                     writeFinalHead: Bool,
+                                     embeddingOverride: MTLBuffer? = nil,
+                                     bidirectionalBlock: Range<Int>? = nil) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
@@ -800,7 +886,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     m: tokenCount,
                     n: rows,
                     k: columns)
-                if path == .affineThreadgroupF16 {
+                if path.path == .affineThreadgroupF16 {
                     return
                 }
             }
@@ -905,18 +991,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
-        prefillEmbed.encode(commandBuffer: cb,
-                            table: emb.buffer,
-                            tableOffset: Int(emb.offset),
-                            scales: emb.buffer,
-                            scalesOffset: Int(emb.scaleOffset),
-                            biases: emb.buffer,
-                            biasesOffset: Int(emb.biasOffset),
-                            tokens: tokenBuffer,
-                            out: scratch.hidden,
-                            t: UInt32(t),
-                            d: UInt32(D),
-                            outScale: embedOutScale)
+        if let embeddingOverride {
+            let bytes = t * D * MemoryLayout<Float16>.stride
+            guard embeddingOverride.length >= bytes,
+                  let blit = cb.makeBlitCommandEncoder() else {
+                throw VisionRuntimeError.invalidInput(
+                    "projected image feature buffer is too small")
+            }
+            blit.copy(from: embeddingOverride,
+                      sourceOffset: 0,
+                      to: scratch.hidden,
+                      destinationOffset: 0,
+                      size: bytes)
+            blit.endEncoding()
+        } else {
+            prefillEmbed.encode(commandBuffer: cb,
+                                table: emb.buffer,
+                                tableOffset: Int(emb.offset),
+                                scales: emb.buffer,
+                                scalesOffset: Int(emb.scaleOffset),
+                                biases: emb.buffer,
+                                biasesOffset: Int(emb.biasOffset),
+                                tokens: tokenBuffer,
+                                out: scratch.hidden,
+                                t: UInt32(t),
+                                d: UInt32(D),
+                                outScale: embedOutScale)
+        }
 
         for L in 0..<cfg.numLayers {
             model.beginOpeningRoutedExpertStreamer(layer: L)
@@ -1147,7 +1248,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         kvTokenStrideElements: UInt32(kvDim),
                         qTokenStrideElements: UInt32(qDim),
                         oTokenStrideElements: UInt32(qDim),
-                        scale: Float(cfg.attentionScale))
+                        scale: Float(cfg.attentionScale),
+                        bidirectionalBlockStart: UInt32(
+                            isFull ? 0 : bidirectionalBlock?.lowerBound ?? 0),
+                        bidirectionalBlockEnd: UInt32(
+                            isFull ? 0 : bidirectionalBlock?.upperBound ?? 0))
                 if let kv {
                         let keyBuffer = kv.keyBuffer(layer: L, validTokenCount: startPosition + t)
                         let valueBuffer = kv.valueBuffer(layer: L, validTokenCount: startPosition + t)
@@ -1162,6 +1267,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                       out: scratch.attentionOutput,
                                                       params: params,
                                                       kvRingCapacity: activeRingCapacity,
+                                                      layerKind: isFull ? .full : .slidingWindow,
                                                       path: prefillAttentionPath)
                 } else {
                     throw PrefillError.chunkedUnsupported(
@@ -1250,10 +1356,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         hiddenStrideElements: UInt32(D))
 
                     cb.commit()
-                    waitForCompletion(cb)
-                    if let error = cb.error {
-                        throw error
-                    }
+                    try waitForCompletion(cb)
 
                     let routeCount = t * cfg.topKExperts
                     let idPtr = scratch.routeIDs.contents()
@@ -1352,10 +1455,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         }
                     }
                     sharedCB.commit()
-                    waitForCompletion(sharedCB)
-                    if let error = sharedCB.error {
-                        throw error
-                    }
+                    try waitForCompletion(sharedCB)
 
                     let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                         device: ctx.device,
@@ -1372,11 +1472,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     func drainOldestPendingTile() throws {
                         guard !pendingTiles.isEmpty else { return }
                         let pending = pendingTiles.removeFirst()
-                        withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
-                            waitForCompletion(pending.commandBuffer)
-                        }
-                        if let error = pending.commandBuffer.error {
-                            throw error
+                        try withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
+                            try waitForCompletion(pending.commandBuffer)
                         }
                         if !pending.fetch.plannedMissSlots.isEmpty {
                             try tileLifetime.complete(tileIndex: pending.tileIndex)
@@ -1540,11 +1637,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        count: t * D)
                     }
                     tailCB.commit()
-                    withExtendedLifetime(metadata) {
-                        waitForCompletion(tailCB)
-                    }
-                    if let error = tailCB.error {
-                        throw error
+                    try withExtendedLifetime(metadata) {
+                        try waitForCompletion(tailCB)
                     }
                     if L + 1 < cfg.numLayers {
                         guard let nextCB = ctx.queue.makeCommandBuffer() else {
@@ -1597,10 +1691,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  rmsEps: eps)
             }
             finalCB.commit()
-            waitForCompletion(finalCB)
-            if let error = finalCB.error {
-                throw error
-            }
+            try waitForCompletion(finalCB)
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             }
@@ -1639,30 +1730,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var pendingRoutedCommand: PendingRoutedCommand?
 
         func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
-                                        waitIfNeeded: Bool) {
+                                        waitIfNeeded: Bool) throws {
             if waitIfNeeded {
-                func wait(_ cb: MTLCommandBuffer) {
-                    waitForCompletion(cb)
-                }
                 if let sharedCB = pending.sharedCB {
-                    wait(sharedCB)
+                    waitUntilCompleted(sharedCB)
                 }
                 if let phase1HitCB = pending.phase1HitCB {
-                    wait(phase1HitCB)
+                    waitUntilCompleted(phase1HitCB)
                 }
-                wait(pending.cb)
-            } else if let err = pending.cb.error {
-                print("CB error: \(err)")
+                waitUntilCompleted(pending.cb)
             }
             if let sharedCB = pending.sharedCB {
-                if let err = sharedCB.error {
-                    print("CB error: \(err)")
-                }
+                try checkCommandBufferError(sharedCB.error)
             }
-            if let phase1HitCB = pending.phase1HitCB,
-               let err = phase1HitCB.error {
-                print("CB error: \(err)")
+            if let phase1HitCB = pending.phase1HitCB {
+                try checkCommandBufferError(phase1HitCB.error)
             }
+            try checkCommandBufferError(pending.cb.error)
             totalCb2Nanos &+= pending.encodeAndCommitNanos
         }
 
@@ -1674,7 +1758,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Embed lookup + sqrt(H) fused.
         let emb = model.embedding
         do {
-            runSync { cb in
+            try runSync { cb in
                 embedInt4.encode(commandBuffer: cb,
                                  table:  emb.buffer, tableOffset:  Int(emb.offset),
                                  scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
@@ -1863,12 +1947,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForCompletion(cb)
+            waitUntilCompleted(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
-                finishPendingRoutedCommand(pending, waitIfNeeded: false)
+                try finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
+            try checkCommandBufferError(cb.error)
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
 
             // CPU readback to fetch routed-expert blobs from disk.
@@ -2114,7 +2199,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             continue
         }
         if let pending = pendingRoutedCommand {
-            finishPendingRoutedCommand(pending, waitIfNeeded: true)
+            try finishPendingRoutedCommand(pending, waitIfNeeded: true)
             pendingRoutedCommand = nil
         }
 
@@ -2150,11 +2235,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                runSync(gFusionHead)
+                try runSync(gFusionHead)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                runSync { cb in
+                try runSync { cb in
                     gFinalNorm(cb)
                     gLmHead(cb)
                 }
@@ -2328,21 +2413,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     x: attnOut, y: oOut, m: D, n: qDim)
     }
 
-    private func runSync(_ body: (MTLCommandBuffer) -> Void) {
+    private func runSync(_ body: (MTLCommandBuffer) -> Void) throws {
         let cb = ctx.queue.makeCommandBuffer()!
         body(cb)
         cb.commit()
-        cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
-        }
+        try waitForCompletion(cb)
     }
 
-    private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {
+    private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) throws {
+        waitUntilCompleted(cb)
+        try checkCommandBufferError(cb.error)
+    }
+
+    private nonisolated func waitUntilCompleted(_ cb: MTLCommandBuffer) {
         cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
-        }
     }
 
 }

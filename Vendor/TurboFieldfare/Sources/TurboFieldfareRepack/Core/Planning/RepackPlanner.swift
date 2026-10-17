@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// On-disk page alignment unit for `.gturbo` files. Fixed at 16 KB regardless
 /// of host page size — the format is the contract, not the kernel.
@@ -94,7 +95,113 @@ struct RepackPlan: Sendable {
 
 // MARK: - Planner
 
+public struct VisionPackPlan: Sendable {
+    public struct Entry: Sendable {
+        public let source: SourceTensor
+        public let executionPosition: Int
+        public let fileOffset: UInt64
+        public let quantSpec: QuantSpec?
+        /// Affine group size, pinned to 64 by `planVisionCompanion`.
+        public let groupSize: Int
+
+        public init(source: SourceTensor, executionPosition: Int,
+                    fileOffset: UInt64, quantSpec: QuantSpec?, groupSize: Int) {
+            self.source = source
+            self.executionPosition = executionPosition
+            self.fileOffset = fileOffset
+            self.quantSpec = quantSpec
+            self.groupSize = groupSize
+        }
+    }
+
+    public let entries: [Entry]
+    public let weightsFileSize: UInt64
+    public let sourcePayloadBytes: UInt64
+
+    public init(entries: [Entry], weightsFileSize: UInt64, sourcePayloadBytes: UInt64) {
+        self.entries = entries
+        self.weightsFileSize = weightsFileSize
+        self.sourcePayloadBytes = sourcePayloadBytes
+    }
+}
+
 enum RepackPlanner {
+
+    static func planVisionCompanion(
+        meta: IndexLoader.SourceMetadata,
+        shardHeaders: [Safetensors.Header]
+    ) throws -> VisionPackPlan {
+        guard meta.baseBits == 4, meta.baseGroupSize == 64,
+              meta.baseMode.lowercased() == "affine" else {
+            throw RepackError.configurationInvalid(
+                detail: "vision companion requires MLX affine 4-bit group-64 source metadata")
+        }
+
+        let tensors = shardHeaders.flatMap(\.tensors).filter {
+            isVisionCompanionTensorName($0.name)
+        }
+        guard tensors.count == 358 else {
+            throw RepackError.configurationInvalid(
+                detail: "expected 358 vision tensors, found \(tensors.count)")
+        }
+        let sourceBytes = tensors.reduce(UInt64(0)) { $0 + $1.sizeBytes }
+        guard sourceBytes == 1_140_925_536 else {
+            throw RepackError.configurationInvalid(
+                detail: "expected 1140925536 vision bytes, found \(sourceBytes)")
+        }
+
+        let ordered = tensors.sorted { visionExecutionKey($0.name) < visionExecutionKey($1.name) }
+        var offset: UInt64 = 0
+        var entries: [VisionPackPlan.Entry] = []
+        entries.reserveCapacity(ordered.count)
+        for (position, tensor) in ordered.enumerated() {
+            offset = visionAlignUp(offset, to: GTurboVisionFormatV1.alignmentBytes)
+            let quantSpec: QuantSpec?
+            if tensor.dtype == .u32 {
+                let spec = IndexLoader.quantSpec(forTensor: tensor.name, meta: meta)
+                guard spec.bits == 4 else {
+                    throw RepackError.configurationInvalid(
+                        detail: "unsupported vision quantization for \(tensor.name)")
+                }
+                quantSpec = spec
+            } else {
+                guard tensor.dtype == .bf16 else {
+                    throw RepackError.configurationInvalid(
+                        detail: "unsupported vision dtype for \(tensor.name)")
+                }
+                quantSpec = nil
+            }
+            entries.append(.init(source: tensor,
+                                 executionPosition: position,
+                                 fileOffset: offset,
+                                 quantSpec: quantSpec,
+                                 groupSize: meta.baseGroupSize))
+            offset += tensor.sizeBytes
+        }
+        return VisionPackPlan(entries: entries,
+                              weightsFileSize: offset,
+                              sourcePayloadBytes: sourceBytes)
+    }
+
+    private static func visionExecutionKey(_ name: String) -> String {
+        if name.hasPrefix("vision_tower.patch_embedder.") {
+            return "0000/\(name)"
+        }
+        if let layer = layerIndex(in: name), name.hasPrefix("vision_tower.encoder.layers.") {
+            return String(format: "1000/%03d/%@", layer, name)
+        }
+        if name == "vision_tower.std_bias" || name == "vision_tower.std_scale" {
+            return "2000/\(name)"
+        }
+        if name.hasPrefix("embed_vision.") {
+            return "3000/\(name)"
+        }
+        return "9999/\(name)"
+    }
+
+    private static func visionAlignUp(_ value: UInt64, to alignment: UInt64) -> UInt64 {
+        ((value + alignment - 1) / alignment) * alignment
+    }
 
     /// Classify a tensor name. Routed-expert tensors split off the LM bucket.
     enum Bucket: Equatable {
@@ -233,10 +340,12 @@ enum RepackPlanner {
                           excludedMultimodalTensorNames: excludedMultimodalNames)
     }
 
+    private static func isVisionCompanionTensorName(_ name: String) -> Bool {
+        name.hasPrefix("vision_tower.") || name.hasPrefix("embed_vision.")
+    }
+
     private static func isMultimodalTensorName(_ name: String) -> Bool {
-        name.hasPrefix("vision_tower.") ||
-            name.hasPrefix("embed_vision.") ||
-            name.hasPrefix("audio_tower.")
+        isVisionCompanionTensorName(name) || name.hasPrefix("audio_tower.")
     }
 
     // MARK: - Resident planning

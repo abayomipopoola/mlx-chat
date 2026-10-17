@@ -36,14 +36,20 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .chatml {
             return try consumeChatML(tokenID: tokenID, delta: delta)
         }
+        // Held-back text on a control token belongs to the channel in effect
+        // before the marker switches it.
+        var events: [StructuredAssistantEvent] = []
+        if tokenizer.structuralMarkerIDs.contains(tokenID), !delta.isEmpty, toolTokens == nil {
+            events = routeText(delta)
+        }
         if tokenID == tokenizer.channelStartID {
             label = ""
             channel = .label
-            return []
+            return events
         }
         if tokenID == tokenizer.channelEndID {
             channel = .visible
-            return []
+            return events
         }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
@@ -51,7 +57,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 throw ToolCallParserError.malformed
             }
             toolTokens = []
-            return []
+            return events
         }
         if tokenID == tokenizer.toolCallEndID {
             guard let tokens = toolTokens else {
@@ -75,7 +81,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 failed = true
                 throw ToolCallParserError.malformed
             }
-            return []
+            return events
         }
         if var tokens = toolTokens {
             tokens.append(tokenID)
@@ -86,6 +92,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
+        return events + routeText(delta)
+    }
+
+    private func routeText(_ delta: String) -> [StructuredAssistantEvent] {
         switch channel {
         case .thought:
             return []
@@ -110,13 +120,17 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
     /// else streams as visible content.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        var events: [StructuredAssistantEvent] = []
+        if tokenizer.structuralMarkerIDs.contains(tokenID), !delta.isEmpty, toolTokens == nil {
+            events = routeText(delta)
+        }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
                 failed = true
                 throw ToolCallParserError.malformed
             }
             toolTokens = []
-            return []
+            return events
         }
         if tokenID == tokenizer.toolCallEndID {
             guard let tokens = toolTokens else {
@@ -146,11 +160,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         if tokenID == tokenizer.thinkStartID {
             channel = .thought
-            return []
+            return events
         }
         if tokenID == tokenizer.thinkEndID {
             channel = .visible
-            return []
+            return events
         }
         guard channel != .thought else { return [] }
         return delta.isEmpty ? [] : [.content(delta)]

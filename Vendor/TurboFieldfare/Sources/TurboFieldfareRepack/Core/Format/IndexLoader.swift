@@ -19,6 +19,21 @@ enum IndexLoader {
         /// Resolved set of shard files referenced by the index, in
         /// encounter order. Order is stable enough for sequential I/O.
         let shardFilenames: [String]
+
+        init(indexPath: String, configPath: String, indexSha256Hex: String,
+             weightMap: [String: String], baseBits: Int, baseGroupSize: Int,
+             baseMode: String, bitsOverrides: [String: QuantSpec],
+             shardFilenames: [String]) {
+            self.indexPath = indexPath
+            self.configPath = configPath
+            self.indexSha256Hex = indexSha256Hex
+            self.weightMap = weightMap
+            self.baseBits = baseBits
+            self.baseGroupSize = baseGroupSize
+            self.baseMode = baseMode
+            self.bitsOverrides = bitsOverrides
+            self.shardFilenames = shardFilenames
+        }
     }
 
     static func load(snapshotDir: String) throws -> SourceMetadata {

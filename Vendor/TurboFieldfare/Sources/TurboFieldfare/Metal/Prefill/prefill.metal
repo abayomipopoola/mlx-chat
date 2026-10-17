@@ -820,6 +820,8 @@ struct PrefillAttentionParams {
     uint qTokenStrideElements;
     uint oTokenStrideElements;
     float scale;
+    uint bidirectionalBlockStart;
+    uint bidirectionalBlockEnd;
 };
 
 static inline uint prefill_kv_slot(uint logical) {
@@ -895,7 +897,12 @@ kernel void attention_prefill_causal_tiled(
     if (p.slidingWindow != 0u && abs_q + 1u > p.slidingWindow) {
         first = abs_q + 1u - p.slidingWindow;
     }
-    const uint last_exclusive = min(p.kvValidCount, abs_q + 1u);
+    const bool in_bidirectional_block =
+        abs_q >= p.bidirectionalBlockStart &&
+        abs_q < p.bidirectionalBlockEnd;
+    const uint last_exclusive = min(
+        p.kvValidCount,
+        in_bidirectional_block ? p.bidirectionalBlockEnd : abs_q + 1u);
 
     device const half* q_row = Q + t * p.qTokenStrideElements + qh * p.headDim;
     float row_max = -INFINITY;

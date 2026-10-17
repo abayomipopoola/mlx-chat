@@ -39,8 +39,33 @@ struct StreamedMoEVariant: Identifiable, Hashable, Sendable {
 
     /// Every app-owned artifact created by the resumable installer. Sidecars
     /// come first so the registered payload stays intact if moving one fails.
+    /// Gemma rows also list the vision companion and its resume files.
     var managedInstallArtifactURLs: [URL] {
-        managedInstallPaths.removableArtifacts
+        let text = managedInstallPaths
+        guard architecture == .gemma4,
+              let companion = try? VisionPackLocation.companionURL(
+                forTextModel: managedDirectory) else {
+            return text.removableArtifacts
+        }
+        let vision = StreamedModelInstallPaths(finalDirectory: companion)
+        return [
+            text.checkpointFile,
+            text.partialDirectory,
+            vision.checkpointFile,
+            vision.partialDirectory,
+            text.finalDirectory,
+            vision.finalDirectory,
+        ]
+    }
+
+    var companionDirectory: URL? {
+        guard architecture == .gemma4 else { return nil }
+        return try? VisionPackLocation.companionURL(forTextModel: managedDirectory)
+    }
+
+    var needsVisionCompanion: Bool {
+        architecture == .gemma4
+            && !VisionPackLocation.packLooksPresent(beside: managedDirectory)
     }
 }
 
@@ -162,6 +187,30 @@ enum StreamedMoEInstall {
 
     static func variant(forStreamedModelID id: String) -> StreamedMoEVariant? {
         variants.first { $0.modelID == id }
+    }
+
+    /// Source payload of the Gemma vision companion, plus a small allowance
+    /// for `processor_config.json`, `manifest.json`, and the receipt.
+    static let visionCompanionSourceBytes: UInt64 = 1_140_925_536
+    static let approximateVisionCompanionBytes: UInt64 = 1_140_925_536 + 262_144
+
+    static func visionCompanionLooksPresent(beside directory: URL) -> Bool {
+        VisionPackLocation.packLooksPresent(beside: directory)
+    }
+
+    /// Gemma SSD installs report vision only when a companion pack is on disk
+    /// next to the text `.gturbo`. Qwen and Ornith streamed installs stay text-only.
+    static func applyingVisionPackPresence(
+        to model: CatalogModel,
+        directory: URL?
+    ) -> CatalogModel {
+        guard let variant = variant(forStreamedModelID: model.id),
+              variant.architecture == .gemma4,
+              let directory,
+              VisionPackLocation.packLooksPresent(beside: directory) else {
+            return model
+        }
+        return model.withSupportsVision(true)
     }
 
     static let requiredTokenizerPaths = [

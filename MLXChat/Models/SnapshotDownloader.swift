@@ -185,13 +185,23 @@ enum SnapshotDownloader {
     /// Selects one repository folder and removes that prefix locally. This lets
     /// repositories such as LiquidAI/LFM2.5-2.6B-MLX expose several precision
     /// folders while the MLX loader still sees config and weights at its root.
+    ///
+    /// Weights below the model root are skipped: MLX merges every `.safetensors` it finds
+    /// under the directory into one strict load, so an optional draft head such as
+    /// Bonsai 2's `mtp/model.safetensors` would fail it.
     static func localPath(for remotePath: String, subfolder: String?) -> String? {
         guard isWanted(remotePath) else { return nil }
-        guard let subfolder, !subfolder.isEmpty else { return remotePath }
-        let prefix = subfolder.hasSuffix("/") ? subfolder : subfolder + "/"
-        guard remotePath.hasPrefix(prefix) else { return nil }
-        let localPath = String(remotePath.dropFirst(prefix.count))
-        return localPath.isEmpty ? nil : localPath
+        let localPath: String
+        if let subfolder, !subfolder.isEmpty {
+            let prefix = subfolder.hasSuffix("/") ? subfolder : subfolder + "/"
+            guard remotePath.hasPrefix(prefix) else { return nil }
+            localPath = String(remotePath.dropFirst(prefix.count))
+        } else {
+            localPath = remotePath
+        }
+        guard !localPath.isEmpty else { return nil }
+        if localPath.hasSuffix(".safetensors"), localPath.contains("/") { return nil }
+        return localPath
     }
 
     /// Downloads all wanted files into `destination` (a plain `~/Models/<org>/<name>`

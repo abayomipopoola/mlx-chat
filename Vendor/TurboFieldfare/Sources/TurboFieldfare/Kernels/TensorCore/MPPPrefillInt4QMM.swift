@@ -1,10 +1,21 @@
 import Foundation
 import Metal
 
-final class MPPPrefillInt4QMM {
-    enum Path: String, Sendable {
+public final class MPPPrefillInt4QMM {
+    public enum Variant: String, Sendable {
+        case control
+        case apple10V1 = "apple10-v1"
+        case apple10BF16 = "apple10-bf16"
+    }
+
+    public enum Path: String, Sendable {
         case affineThreadgroupF16 = "affine-threadgroup-f16"
         case unavailable
+        case fallback
+    }
+
+    public struct PathMetadata: Sendable, Equatable {
+        public let path: Path
     }
 
     static let tileM = 64
@@ -12,8 +23,10 @@ final class MPPPrefillInt4QMM {
     static let tileK = Quantization.groupSize
 
     private var pipeline: MTLComputePipelineState?
+    public let unavailableReason: String?
 
-    init(context: MetalContext) {
+    init(context: MetalContext, variant: Variant = .control) {
+        _ = variant
         do {
             let library = try Self.compileTensorOpsLibrary(device: context.device)
             guard let function = library.makeFunction(
@@ -21,8 +34,10 @@ final class MPPPrefillInt4QMM {
                 throw MetalError.missingFunction("mpp_prefill_affine_threadgroup_f16")
             }
             self.pipeline = try context.device.makeComputePipelineState(function: function)
+            self.unavailableReason = nil
         } catch {
             self.pipeline = nil
+            self.unavailableReason = String(describing: error)
         }
     }
 
@@ -39,7 +54,7 @@ final class MPPPrefillInt4QMM {
                        y: MTLBuffer, yOffset: Int = 0,
                        m: Int,
                        n: Int,
-                       k: Int) -> Path {
+                       k: Int) -> PathMetadata {
         guard m > 0,
               n > 0,
               k > 0,
@@ -51,7 +66,7 @@ final class MPPPrefillInt4QMM {
               yOffset.isMultiple(of: MemoryLayout<Float16>.stride),
               let pipeline,
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            return .unavailable
+            return PathMetadata(path: .fallback)
         }
 
         encoder.setComputePipelineState(pipeline)
@@ -74,7 +89,7 @@ final class MPPPrefillInt4QMM {
                                            height: 1,
                                            depth: 1))
         encoder.endEncoding()
-        return .affineThreadgroupF16
+        return PathMetadata(path: .affineThreadgroupF16)
     }
 
     private static func compileTensorOpsLibrary(device: MTLDevice) throws -> MTLLibrary {

@@ -338,12 +338,24 @@ public enum ManifestReader {
     private static func validateQuant(_ quant: ManifestQuant, family: ModelFamily) throws {
         // LFM2 keeps a 6-bit embedding (also its lm_head) and an unquantized
         // float32 router, which the writer records as 32 bits.
-        let lfm = family == .lfm2moe
+        let embeddingBits: Set<Int>
+        let routerBits: Set<Int>
+        switch family {
+        case .lfm2moe:
+            embeddingBits = [6]
+            routerBits = [32]
+        case .flint:
+            embeddingBits = [8]
+            routerBits = [16]
+        case .gemma4, .qwen36:
+            embeddingBits = [4]
+            routerBits = [8]
+        }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, lfm ? [6] : [4]),
+            ("embedding", quant.embedding, embeddingBits),
             ("attention", quant.attention, [4]),
-            ("router", quant.router, lfm ? [32] : [8]),
-            ("sharedExpert", quant.sharedExpert, lfm ? [4] : [4, 8]),
+            ("router", quant.router, routerBits),
+            ("sharedExpert", quant.sharedExpert, [4, 8]),
             ("routedExpert", quant.routedExpert, [4]),
         ]
         for (name, slot, allowedBits) in slots {

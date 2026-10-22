@@ -36,8 +36,14 @@ final class ChatController {
         }
     }
 
-    /// Transient "Switched to …" confirmation shown after a model switch loads.
+    enum ToastStyle: Equatable {
+        case modelSwitch
+        case thinking(enabled: Bool)
+    }
+
+    /// Transient confirmation shown after a model switch or thinking-mode tap.
     private(set) var switchToast: String?
+    private(set) var switchToastStyle: ToastStyle = .modelSwitch
 
     /// UI-verification hook: hold the confirmation banner for screenshots.
     var effectiveSwitchToast: String? {
@@ -55,6 +61,9 @@ final class ChatController {
     private(set) var isStreaming = false
     private(set) var streamingMessageID: UUID?
     private(set) var isInThinkPhase = false
+    /// Share of the prompt the engine has read, before any output arrives;
+    /// nil when it does not report or once output starts.
+    private(set) var prefillProgress: Double?
     var errorBanner: String?
     /// Conversation eligible for Retry after a failed (empty) turn.
     private var retryConversation: Conversation?
@@ -214,8 +223,17 @@ final class ChatController {
         }
     }
 
+    func showThinkingToast(_ text: String, enabled: Bool = true) {
+        presentToast(text, style: .thinking(enabled: enabled))
+    }
+
     private func showSwitchToast(_ text: String) {
+        presentToast(text, style: .modelSwitch)
+    }
+
+    private func presentToast(_ text: String, style: ToastStyle) {
         toastTask?.cancel()
+        switchToastStyle = style
         switchToast = text
         toastTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2.2))
@@ -277,8 +295,7 @@ final class ChatController {
         let defaults = UserDefaults.standard
         // The preset (including Custom, which owns the old "custom instructions"
         // storage) is the single source of prompt customization.
-        let systemPrompt = PromptBuilder.systemPrompt(
-            presetText: PromptPresets.effectiveText(for: PromptPresets.selected))
+        let systemPrompt = PromptBuilder.currentSystemPrompt()
         let temperature = defaults.object(forKey: Keys.personalizationTemperature) as? Double
             ?? Keys.Defaults.personalizationTemperature
 
@@ -324,7 +341,12 @@ final class ChatController {
                     temperature: temperature, conversationID: conversationID
                 ) {
                     switch event {
+                    case .prefill(let done, let total):
+                        if !sawContent, thinkStartedAt == nil, total > 0 {
+                            self.prefillProgress = Double(done) / Double(total)
+                        }
                     case .delta(let delta):
+                        self.prefillProgress = nil
                         self.contentBuffer += delta
                         self.contentCharacterCount += delta.count
                         if !sawContent {
@@ -335,6 +357,7 @@ final class ChatController {
                             }
                         }
                     case .thinkingDelta(let delta):
+                        self.prefillProgress = nil
                         self.thinkingBuffer += delta
                         self.thinkingCharacterCount += delta.count
                         if thinkStartedAt == nil {
@@ -370,6 +393,7 @@ final class ChatController {
     }
 
     private func finishTurn(in conversation: Conversation) {
+        prefillProgress = nil
         flushTask?.cancel()
         flushTask = nil
         flushBuffers()

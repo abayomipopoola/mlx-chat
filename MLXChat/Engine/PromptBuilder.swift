@@ -9,6 +9,11 @@ enum PromptBuilder {
     /// Assemble the system prompt. `presetText` (the selected prompt preset, possibly
     /// user-edited) is prepended when non-empty; nil/empty falls back to `basePrompt`
     /// alone.
+    /// The system prompt for the selected preset, as the next send will use it.
+    static func currentSystemPrompt() -> String {
+        systemPrompt(presetText: PromptPresets.effectiveText(for: PromptPresets.selected))
+    }
+
     static func systemPrompt(presetText: String? = nil) -> String {
         let preset = presetText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return preset.isEmpty ? basePrompt : preset + "\n\n" + basePrompt

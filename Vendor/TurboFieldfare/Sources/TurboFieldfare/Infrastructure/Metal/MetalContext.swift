@@ -162,6 +162,7 @@ public final class MetalContext: @unchecked Sendable {
         "vision_register_gemm": "Metal/Vision",
         "vision_resize": "Metal/Vision",
         "lfm2": "Metal/LFM2",
+        "flint": "Metal/Flint",
     ]
 
     private static func shaderURL(module: String) -> URL? {

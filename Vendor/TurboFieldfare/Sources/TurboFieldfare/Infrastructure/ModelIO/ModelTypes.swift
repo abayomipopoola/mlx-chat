@@ -9,6 +9,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case lfm2moe = "lfm2moe"
+    case flint = "flint"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -105,6 +106,9 @@ public struct ArchConfig: Sendable, Equatable {
     /// The checkpoint's `max_position_embeddings`. Not a manifest-compared
     /// field, so `ManifestReader.validateArch` does not read it.
     public let maxPositionEmbeddings: Int
+    /// Shared-expert hidden width when it differs from `intermediateSize`.
+    /// Zero means the architecture uses `intermediateSize` for that expert.
+    public let sharedExpertIntermediateSize: Int
 
     public init(
         hiddenSize: Int,
@@ -138,7 +142,8 @@ public struct ArchConfig: Sendable, Equatable {
         ropeNeoxSubdim: Bool = false,
         linearAttention: LinearAttentionConfig = .none,
         numDenseLayers: Int = 0,
-        maxPositionEmbeddings: Int = 262_144
+        maxPositionEmbeddings: Int = 262_144,
+        sharedExpertIntermediateSize: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -172,6 +177,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.linearAttention = linearAttention
         self.numDenseLayers = numDenseLayers
         self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.sharedExpertIntermediateSize = sharedExpertIntermediateSize
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -312,11 +318,60 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Recursive Flint 40B-A2.5B. Fourteen full-attention layers have no
+    /// rotary encoding. The other thirty-five use a 513-token window,
+    /// including the current token, and NeoX rotary encoding. Layers 0 and 1
+    /// are dense; the rest add a 1024-wide shared expert to six of 256
+    /// routed experts.
+    public static let flint_40B_A2_5B = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 6144,
+        moeIntermediateSize: 512,
+        numHeads: 32,
+        numKVHeads: 4,
+        numFullKVHeads: 4,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 150_144,
+        slidingWindow: 513,
+        finalLogitSoftcap: 0,
+        ropeTheta: 10_000,
+        fullRopeTheta: 10_000,
+        partialRotaryFactor: 1,
+        numLayers: 49,
+        numExperts: 256,
+        topKExperts: 6,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.flintLayerMask(),
+        hiddenActivation: "silu",
+        family: .flint,
+        attnOutputGate: false,
+        attentionScale: 1 / (128.0 as Double).squareRoot(),
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        numDenseLayers: 2,
+        maxPositionEmbeddings: 262_144,
+        sharedExpertIntermediateSize: 1024
+    )
+
+    private static func flintLayerMask() -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: 49)
+        for index in [0, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 48] {
+            mask[index] = 1
+        }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
         .lfm2moe: .lfm25_24B_A2B,
+        .flint: .flint_40B_A2_5B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -339,6 +394,10 @@ public struct ArchConfig: Sendable, Equatable {
         }
         shapes.append((m: intermediateSize, n: hiddenSize))
         shapes.append((m: hiddenSize, n: intermediateSize))
+        if sharedExpertIntermediateSize > 0 {
+            shapes.append((m: sharedExpertIntermediateSize, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: sharedExpertIntermediateSize))
+        }
         return shapes
     }
 

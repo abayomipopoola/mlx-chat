@@ -131,6 +131,26 @@ import Testing
     }
 
     @MainActor
+    @Test func markdownCacheMatchesFreshParseAcrossGenerations() {
+        let cache = MarkdownContentCache(capacity: 2)
+        let texts = ["# One", "Euler: $e^{i\\pi}+1=0$.", "**Three**", "# One", "**Three**"]
+        for text in texts {
+            #expect(cache.content(for: text) == MarkdownContentCache().content(for: text))
+        }
+    }
+
+    @MainActor
+    @Test func markdownCacheKeepsMathAndPlainTextApart() {
+        let cache = MarkdownContentCache()
+        let text = "Euler: $e^{i\\pi}+1=0$."
+        let math = cache.content(for: text)
+        let plain = cache.content(for: text, math: false)
+        #expect(math != plain)
+        #expect(cache.content(for: text) == math)
+        #expect(cache.content(for: text, math: false) == plain)
+    }
+
+    @MainActor
     @Test func cachedSegmentsUpdateWhenContentGrows() {
         let cache = SegmentCache()
         let id = UUID()

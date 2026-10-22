@@ -26,6 +26,9 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 public enum ChatDialect: String, Sendable {
     case gemma
     case chatml
+    /// Llama-style byte-level BPE with `<|assistant|>` role markers. Flint
+    /// uses this. `<think>` is an ordinary added token, not a forced span.
+    case flint
 }
 
 /// Which ChatML model family a `.chatml` tokenizer belongs to. Qwen has no BOS
@@ -147,16 +150,27 @@ public struct GFTokenizer: @unchecked Sendable {
     public init(tokenizer: any Tokenizer) throws {
         self.tokenizer = tokenizer
 
-        let dialect: ChatDialect =
-            Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
-        let family: ChatMLFamily? = dialect == .gemma ? nil
+        let dialect: ChatDialect
+        if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
+            dialect = .chatml
+        } else if Self.specialTokenID(tokenizer, "<|assistant|>") != nil,
+                  Self.specialTokenID(tokenizer, "<|begin_of_text|>") != nil {
+            dialect = .flint
+        } else {
+            dialect = .gemma
+        }
+        let family: ChatMLFamily? = dialect != .chatml ? nil
             : Self.specialTokenID(tokenizer, Self.lfmBOSMark) != nil
                 && Self.specialTokenID(tokenizer, "<tool_call>") == nil ? .lfm : .qwen
         let resolved: ResolvedSpecialTokens
-        switch family {
-        case nil: resolved = try Self.resolveGemmaTokens(tokenizer)
-        case .qwen: resolved = try Self.resolveChatMLTokens(tokenizer)
-        case .lfm: resolved = try Self.resolveLFMTokens(tokenizer)
+        switch dialect {
+        case .gemma: resolved = try Self.resolveGemmaTokens(tokenizer)
+        case .flint: resolved = try Self.resolveFlintTokens(tokenizer)
+        case .chatml:
+            switch family {
+            case .qwen, nil: resolved = try Self.resolveChatMLTokens(tokenizer)
+            case .lfm: resolved = try Self.resolveLFMTokens(tokenizer)
+            }
         }
 
         self.dialect = dialect
@@ -182,8 +196,10 @@ public struct GFTokenizer: @unchecked Sendable {
             resolved.toolResponseID, resolved.toolResponseEndID,
             resolved.channelStartID, resolved.channelEndID,
         ]
-        if let thinkStartID = resolved.thinkStartID { specials.insert(thinkStartID) }
-        if let thinkEndID = resolved.thinkEndID { specials.insert(thinkEndID) }
+        if dialect != .flint {
+            if let thinkStartID = resolved.thinkStartID { specials.insert(thinkStartID) }
+            if let thinkEndID = resolved.thinkEndID { specials.insert(thinkEndID) }
+        }
         self.specialTokenIDs = specials
     }
 
@@ -333,6 +349,40 @@ public struct GFTokenizer: @unchecked Sendable {
             vocabSize: 128_000)
     }
 
+    /// Flint stops on end-of-text and on the role markers that would start
+    /// another turn. `<think>` stays an ordinary token so the text filter
+    /// can see it.
+    private static func resolveFlintTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = Self.specialTokenID(tokenizer, token) else {
+                throw GFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let endOfText = try id("<|end_of_text|>")
+        let user = try id("<|user|>")
+        let observation = try id("<|observation|>")
+        let developer = try id("<|developer|>")
+        return ResolvedSpecialTokens(
+            bosID: try id("<|begin_of_text|>"),
+            bosPrefixID: nil,
+            eosID: endOfText,
+            padID: endOfText,
+            endOfTurnID: endOfText,
+            toolCallStartID: endOfText,
+            toolCallEndID: endOfText,
+            toolResponseID: observation,
+            toolResponseEndID: developer,
+            channelStartID: endOfText,
+            channelEndID: endOfText,
+            thinkStartID: Self.specialTokenID(tokenizer, "<think>").map(Int32.init),
+            thinkEndID: Self.specialTokenID(tokenizer, "</think>").map(Int32.init),
+            stopTokenIDs: [endOfText, user, observation, developer],
+            vocabSize: 150_144)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -441,6 +491,7 @@ public struct GFTokenizer: @unchecked Sendable {
         switch dialect {
         case .gemma: return try gemmaChatTemplate(messages)
         case .chatml: return try chatMLChatTemplate(messages)
+        case .flint: return try flintChatTemplate(messages)
         }
     }
 
@@ -475,6 +526,64 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         s += chatMLNoThinkSuffix
         return s
+    }
+
+    private func flintChatTemplate(_ messages: [Message]) throws -> String {
+        var system = ""
+        var turns: [(String, String)] = []
+        for (index, message) in messages.enumerated() {
+            guard let rawContent = message.content else {
+                throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
+            }
+            if message.role == .system {
+                if index != 0 {
+                    throw GFTokenizerError.invalidChatTemplate("system message must be first")
+                }
+                system = rawContent
+            } else {
+                let role = message.role == .assistant ? "assistant" : "user"
+                turns.append((role, rawContent))
+            }
+        }
+        return Self.flintPrompt(turns: turns, system: system)
+    }
+
+    /// Flint's chat template. Role markers are concatenated with no newline,
+    /// including after `<|assistant|>`: the template trims both sides, and a
+    /// stray newline there makes the model skip `<think>`. User and system
+    /// text cannot contain the role markers or a think tag.
+    public static func flintPrompt(turns: [(String, String)],
+                            system: String) -> String {
+        func cleaned(_ raw: String) -> String {
+            var text = raw.replacingOccurrences(of: "\u{0}", with: "")
+            for tag in ["<think>", "</think>"] {
+                text = text.replacingOccurrences(of: tag, with: "")
+            }
+            for tag in ["<|begin_of_text|>", "<|end_of_text|>",
+                        "<|system|>", "<|developer|>", "<|user|>",
+                        "<|assistant|>", "<|observation|>"] {
+                let escaped = tag.replacingOccurrences(of: "<", with: "&lt;")
+                    .replacingOccurrences(of: ">", with: "&gt;")
+                text = text.replacingOccurrences(of: tag, with: escaped)
+            }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var prompt = ""
+        let systemText = cleaned(system)
+        if !systemText.isEmpty {
+            prompt += "<|system|>" + systemText
+        }
+        for turn in turns {
+            if turn.0 == "system" { continue }
+            if turn.0 == "assistant" {
+                let body = turn.1.trimmingCharacters(in: .whitespacesAndNewlines)
+                prompt += "<|assistant|>" + body
+            } else {
+                prompt += "<|" + turn.0 + "|>" + cleaned(turn.1)
+            }
+        }
+        prompt += "<|assistant|>"
+        return prompt
     }
 
     public func encodeToolChat(messages: [Message],
@@ -537,6 +646,8 @@ public struct GFTokenizer: @unchecked Sendable {
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
                     + chatMLNoThinkSuffix,
                 addBOS: false)
+        case .flint:
+            return encode("<|user|>\(content)<|assistant|>", addBOS: false)
         }
     }
 

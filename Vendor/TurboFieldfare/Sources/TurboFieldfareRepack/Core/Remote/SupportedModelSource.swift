@@ -108,10 +108,27 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 13_585_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// Recursive Flint 40B-A2.5B int4. The repo has no
+    /// `model.safetensors.index.json`; the installer writes a canonical one
+    /// from the shard headers and pins that file's SHA-256.
+    public static let flint = SupportedModelSource(
+        name: "flint",
+        displayName: "Flint 40B-A2.5B 4-bit",
+        repoID: "RecursiveSI/flint-int4",
+        revision: "3b93f9053b530488405ae9fca51d4900d6ce21f0",
+        sourceIndexSHA256:
+            "5638b87fac6571726a7d5be1b91371b91f535a2b9aeb632c6362d15e1e084730",
+        modelID: "RecursiveSI/flint-int4",
+        approximateDownloadBytes: 22_579_791_728,
+        installedBytes: 22_570_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, gemma4QAT, qwen36, ornith15, lfm25]
+    public static let all: [SupportedModelSource] = [
+        gemma4, gemma4QAT, qwen36, ornith15, lfm25, flint
+    ]
 
     public static func named(_ name: String) -> SupportedModelSource? {
         // Keep the selectors used by MLX Chat's first streamed-model release.

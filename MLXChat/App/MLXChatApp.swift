@@ -61,10 +61,14 @@ extension Notification.Name {
     static let newChat = Notification.Name("newChat")
     /// Posted by the Esc key monitor; RootView closes any open header dropdown.
     static let dismissHeaderDropdown = Notification.Name("dismissHeaderDropdown")
+    /// Posted after Esc or ⌘. stops a reply, and on returning from a pushed
+    /// page; ChatScreen focuses the composer, which both can leave unfocused.
+    static let focusComposer = Notification.Name("focusComposer")
 }
 
 /// Posts `.dismissHeaderDropdown` on every Esc keydown (event passes through
-/// untouched, so text fields and sheets keep their own Esc behavior).
+/// untouched, so text fields and sheets keep their own Esc behavior). RootView
+/// closes an open dropdown, or else stops a reply in progress.
 private enum EscKeyMonitor {
     private static var installed = false
 
@@ -114,7 +118,7 @@ struct MLXChatApp: App {
             for: [Conversation.self, ChatMessage.self],
             inMemory: capturesReleaseVideo)
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 906, height: 889)
+        .defaultSize(width: 906, height: 780)
         .commands {
             // "Check for Updates…" lives in the app (MLX Chat) menu, right under About.
             CommandGroup(after: .appInfo) {
@@ -131,6 +135,14 @@ struct MLXChatApp: App {
                     NotificationCenter.default.post(name: .newChat, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
+            }
+            CommandGroup(after: .newItem) {
+                Button("Stop Generating") {
+                    chat.stop()
+                    NotificationCenter.default.post(name: .focusComposer, object: nil)
+                }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!chat.isStreaming)
             }
             CommandGroup(after: .sidebar) {
                 Button("Toggle Sidebar") {

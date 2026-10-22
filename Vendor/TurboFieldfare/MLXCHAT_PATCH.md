@@ -14,6 +14,7 @@ model first:
 - `qwen36`: `mlx-community/Qwen3.6-35B-A3B-4bit`
 - `ornith15`: `ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit`
 - `lfm25`: `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (local; see "LFM2 MoE" below)
+- `flint`: `RecursiveSI/flint-int4` (local; see "Flint" below)
 
 The old `--source standard|qat` spellings remain accepted as compatibility
 aliases for saved workflows.
@@ -50,8 +51,10 @@ directory file descriptor for dual-read loads, not because of #129.
 Hardened on-disk format and Model I/O from `d56c8084`. Local additions:
 
 - `TurboFieldfareFormat` target with v1 codecs for the text install, plus
-  optional Qwen family fields on `GTurboManifestArchV1` so Qwen/Ornith
-  manifests stay valid.
+  optional family fields on `GTurboManifestArchV1` so Qwen, Ornith, LFM2, and
+  Flint manifests validate directly through `GTurboManifestCodec` (including
+  packed routed-layer counts for models with leading dense-FFN layers,
+  `slidingWindow >= 0`, and `fullAttentionLayerMask` values `0...3`).
 - Dual-read for `manifest.json`, packed-expert layout, and the resident
   index: v1 codec first, then the pre-#87 JSON/legacy parser. Existing
   text-only `.gturbo` directories keep loading.
@@ -137,6 +140,58 @@ full-attention layer and a window that never clips. Command-buffer checks read
 object, and `MetalContext.makeSystemDefaultDevice` sets
 `AGX_RELAX_CDM_CTXSTORE_TIMEOUT` before the first device is created.
 
+## Upstream open PRs #187 and #188 (early expert read, adapted port)
+
+From the open pull requests at heads `717797cff41c061107751b8849a60fe9dab581ee`
+(#187) and `0ad717015a7e2e13e7ec55a36c25b6e84195dea2` (#188), not yet merged
+upstream. Ported: `ExpertStagingBuffer` and the staging API on
+`PreadExpertStreamer` (`makeStagingBuffer`, `residentExperts`, `readEarly`,
+`adoptStagedExpert`, `executeExpertCachePlan(_:skippingMisses:beforeAdmitting:)`),
+`MoE.encodeRouterLogitsGemma4`, `Model.routedExpertStreamer(layer:)` and the
+skipping fetch, `NextLayerExpertPrefetcher`, and its wiring into
+`RealForwardRunner` decode. `RuntimeConfiguration.earlyExpertRead` is
+`off | router`, default `router`.
+
+Not ported: #188's fitted guess (`NextLayerGuess/`, `NextLayerGuessWeights`).
+It covers only `mlx-community/gemma-4-26b-a4b-it-4bit`, which could not be
+validated here. Default reads per layer is 1, not #188's 2: with the router
+guess on a 36 GB M-series Mac, two reads cost Gemma 4 QAT 20% (56% of reads
+used), while one read gained 2% on it and 6% on Ornith, with identical greedy
+output. `TURBO_FIELDFARE_EARLY_EXPERT_READS` still overrides it. CLI and
+server flags are not included.
+
+## Prompt prefill (local)
+
+`runRawPrefill` feeds a prompt into a continuable producer and stops, so the
+app can warm the system prompt after load. `RawCompletionScratch.logitsBuffer`
+exposes the logits for verification.
+
+`FlintForwardRunner` and `LFM2MoEForwardRunner` prefill layer by layer over
+chunks of up to 2,048 tokens (`prefillChunkTokens`). Projections are
+matrix multiplies over the chunk; attention runs one threadgroup per (KV head,
+token) with an online softmax; router scores come back with one GPU wait per
+routed layer, and top-k reuses the decode selection. Routed experts run
+through `PrefillGroupedRoutedMoE` tiles planned on the expert cache (cached
+experts first, the next tile read while the previous one computes), so each
+expert a chunk needs is read once. Every per-token result is independent of
+the chunking, which the cross-chat resume test relies on. Results are close
+to, not bit-equal with, token-by-token decode.
+
+- Flint uses the tensor-op multiply (`MPPPrefillInt4QMM`) everywhere. On a
+  1,235-token prompt the last-token logits correlated 0.9996 with
+  token-by-token prefill and greedy output matched. Prefill went from
+  27 tok/s to 353 tok/s on a 2,672-token prompt.
+- LFM2.5 keeps conv and dense projections on the FP32-weight multiply
+  (`exactQMMKinds`): the tensor-op multiply rounds dequantized weights to FP16,
+  and with it everywhere the logits correlated only 0.96. With the default
+  0.995 and the same top-1; prefill went from 28 tok/s to about 260 tok/s on
+  a 1,283-token prompt. The short convolution runs a chunk's tokens in order
+  per channel and writes the decode path's conv snapshots.
+- `PrefillGroupedRoutedMoE(saturateFP16:)` sets function constant 78 so
+  grouped activations and down outputs saturate to +/-65504, as Flint's decode
+  clamp does; without it an early token's huge activation turned into NaN.
+  Gemma and Qwen leave it unset, which compiles the kernels unchanged.
+
 ## LFM2 MoE (local)
 
 LiquidAI's LFM2.5-24B-A2B streams from SSD through its own decode runner,
@@ -155,9 +210,46 @@ LiquidAI's LFM2.5-24B-A2B streams from SSD through its own decode runner,
 - Runtime: a private `lfm2` Metal module adds the 6-bit embedding lookup, the
   6-bit tied lm_head GEMV, and the short-convolution decode step. The router
   runs on the CPU (sigmoid scores, `expert_bias` for selection only, top-4
-  renormalized). The streamed-expert kernels are fixed at eight slots, so the
-  four experts are dispatched twice with the second copy weighted zero.
+  renormalized) with an allocation-free top-k. The streamed-expert kernels
+  are fixed at eight slots; phase 1 runs only the four routed slots and the
+  padding slots keep zero activations and zero weights.
   `Attention.maxQHeads` is 32 for LFM's 32 query heads.
-- Prompts run token by token; there is no chunked LFM prefill.
+- Decode reads layer L+1's likeliest experts (its router over layer L's
+  input, top 8) into L+1's cache while layer L runs.
+- Prompts run token by token inside `prefillChunked`; only the last token runs
+  the output head. Conv snapshots come every 8 positions below 1,024 (every
+  64 after), so a resume at the shared system prompt replays at most 7 tokens.
 - Tokenizer: `ChatMLFamily.lfm` prepends `<|startoftext|>`, resolves
   `<|tool_call_start|>` markers, and uses a 128,000-row vocabulary.
+
+## Flint (local)
+
+Recursive Flint 40B-A2.5B streams from SSD through `FlintForwardRunner`.
+The checkpoint has no `model.safetensors.index.json` and stores affine
+weights as U8 bytes; the installer writes a canonical index and folds those
+bytes back into U32 words.
+
+- 49 layers. Layers 0 and 1 are dense SwiGLU (width 6144). The other 47
+  layers add a 1024-wide shared expert to the top 6 of 256 routed experts.
+  Phase 1 runs only the six active slots; the two padding slots stay zero.
+- 14 full-attention layers have no rotary encoding. The other 35 use NeoX
+  rotary encoding and a 513-token window, including the current token.
+  Every query head has a learned attention sink.
+- Embeddings are 8-bit. The untied lm_head is 4-bit. The router is BF16.
+- Prompts run token by token. The chat template ends at `<|assistant|>`
+  with no newline (the Jinja tags trim both sides). With a newline the model
+  skips `<think>` and its closing tag leaks into the answer.
+- Decode waits on the GPU once per MoE layer, for the router scores (BF16
+  GEMV on the GPU, top-k on the CPU). The shared expert then runs while the
+  routed experts are read. The same scores pass also guesses layer L+1's top
+  8 experts from layer L's input and starts reading them early.
+- Attention is split-KV over 32-position chunks (`flint_attention_partial`),
+  merged per query head with the sink (`flint_attention_combine`).
+- Flint kernels live in `Metal/Flint/flint.metal` only; shared kernels are
+  unchanged. Infinity saturation is a Flint kernel, not part of `moe.metal`.
+- Sliding layers keep K/V in a ring of `slidingWindow + slidingRewindMargin`
+  (default 4,096) slots, so the KV cache no longer grows with context for 35
+  of 49 layers. `maxRewindDistance` bounds rewinds; deeper resumes reset.
+- Q/K/V is one fused GEMV (`FusedQKVGEMV`), Q/K norms and rotary encoding are
+  one kernel (`flint_qk_norm_rope`), and each residual add also writes the
+  next RMSNorm (`flint_residual_rmsnorm`, bit-identical to the two kernels).

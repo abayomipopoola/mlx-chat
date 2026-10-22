@@ -228,7 +228,11 @@ package enum GTurboManifestCodec {
               manifest.expertStride % GTurboFormatV1.alignmentBytes == 0 else {
             throw GTurboFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
         }
-        guard manifest.arch.numLayers == manifest.numLayers,
+        let allowsLeadingDenseLayers = manifest.arch.family == "lfm2moe"
+            || manifest.arch.family == "flint"
+        let validLayerCount = manifest.arch.numLayers == manifest.numLayers
+            || (allowsLeadingDenseLayers && manifest.arch.numLayers - manifest.numLayers == 2)
+        guard validLayerCount,
               manifest.arch.numExperts == manifest.expertsPerLayer else {
             throw GTurboFormatError.invalid(
                 field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
@@ -238,7 +242,7 @@ package enum GTurboManifestCodec {
               arch.moeIntermediateSize > 0, arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
-              arch.vocabSize > 0, arch.slidingWindow > 0,
+              arch.vocabSize > 0, arch.slidingWindow >= 0,
               arch.topKExperts > 0, arch.topKExperts <= arch.numExperts,
               arch.finalLogitSoftcap.isFinite,
               arch.ropeTheta.isFinite, arch.ropeTheta > 0,
@@ -247,7 +251,7 @@ package enum GTurboManifestCodec {
               arch.partialRotaryFactor >= 0, arch.partialRotaryFactor <= 1,
               !arch.hiddenActivation.isEmpty,
               arch.fullAttentionLayerMask.count == arch.numLayers,
-              arch.fullAttentionLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }) else {
+              arch.fullAttentionLayerMask.allSatisfy({ (0...3).contains($0) }) else {
             throw GTurboFormatError.invalid(
                 field: "manifest.arch", reason: "invalid architecture values")
         }

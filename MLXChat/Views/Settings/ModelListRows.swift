@@ -183,25 +183,26 @@ private struct ModelAvailabilityControl: View {
                 .accessibilityLabel(removalAccessibilityLabel)
                 .accessibilityIdentifier("removeModel.\(modelID)")
             }
-        } else if let unsupportedReason {
+        } else if unsupportedReason != nil, onDownload == nil {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title2)
                 .foregroundStyle(Color.iconOrange)
-                .help(unsupportedReason)
-                .accessibilityLabel("Unavailable: \(unsupportedReason)")
+                .help(unsupportedReason ?? "")
+                .accessibilityLabel("Unavailable: \(unsupportedReason ?? "")")
         } else {
             Button(action: startDownload) {
-                Image(systemName: model.backend == .streamedMoE
+                Image(systemName: model.backend == .streamedMoE || model.installRestriction != nil
                     ? "externaldrive.badge.plus" : "arrow.down.circle")
                     .font(.title2)
                     .foregroundStyle(Color.brandGreen)
             }
             .buttonStyle(.plain)
-            .help(model.backend == .streamedMoE ? "Set up SSD model" : "Download")
-            .accessibilityLabel(model.backend == .streamedMoE
-                ? "Set up SSD model for \(model.displayName)"
+            .help(model.backend == .streamedMoE || model.installRestriction != nil
+                ? "Download SSD-streamed model" : "Download")
+            .accessibilityLabel(model.backend == .streamedMoE || model.installRestriction != nil
+                ? "Download SSD-streamed model for \(model.displayName)"
                 : "Download \(model.displayName)")
-            .accessibilityIdentifier("downloadModel.\(modelID)")
+            .accessibilityIdentifier("downloadModel.\(model.id)")
         }
     }
 

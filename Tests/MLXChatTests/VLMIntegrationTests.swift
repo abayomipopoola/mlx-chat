@@ -45,6 +45,7 @@ struct VLMIntegrationTests {
                 sawDelta = true
             case .thinkingDelta, .thinkingReclassified:
                 break
+            case .prefill: break
             case .completed:
                 sawCompleted = true
             }
@@ -96,6 +97,7 @@ struct VLMIntegrationTests {
                 sawDelta = true
             case .thinkingDelta, .thinkingReclassified:
                 break
+            case .prefill: break
             case .completed:
                 sawCompleted = true
             }
@@ -144,6 +146,7 @@ struct VLMIntegrationTests {
                 sawDelta = true
             case .thinkingDelta, .thinkingReclassified:
                 break
+            case .prefill: break
             case .completed:
                 sawCompleted = true
             }

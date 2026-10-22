@@ -42,6 +42,10 @@ public struct RawCompletionScratch: @unchecked Sendable {
     let outToken: MTLBuffer
     let sampler: Sampler
 
+    /// The logits the last prefill or token left, for callers that read them
+    /// directly (verification, scoring).
+    public var logitsBuffer: MTLBuffer { logits }
+
     public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 30.0) throws {
         guard let logits = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
                                                      options: .storageModeShared),
@@ -68,6 +72,46 @@ extension GenerationConfig {
         temperature == 0 && repetitionPenalty == 1
     }
 
+}
+
+/// Feeds the text prompt `promptIds` after `start` into `producer` without
+/// sampling, leaving its cache holding the whole prompt. Used to warm a
+/// shared prefix such as the system prompt before the first request.
+public func runRawPrefill(producer: any ContinuableLogitProducer,
+                          promptIds: [Int32],
+                          scratch: RawCompletionScratch,
+                          prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                          start: RawCompletionStart = .reset) async throws {
+    guard !promptIds.isEmpty else { throw GeneratorError.emptyPrompt }
+    if let context = producer as? any ContextWindowReporting,
+       promptIds.count > context.maxContext {
+        throw GeneratorError.contextOverflow(prompt: promptIds.count, maxNew: 0,
+                                             maxContext: context.maxContext)
+    }
+    var position = 0
+    switch start {
+    case .reset:
+        producer.reset()
+    case .resume(let count):
+        guard count > 0, count < promptIds.count else {
+            throw GeneratorError.invalidContinuation(
+                "cached prompt token count must be greater than zero and less than the prompt")
+        }
+        try producer.prepareForContinuation(expectedPosition: count)
+        position = count
+    }
+    let tokens = promptIds[position...]
+    if prefillConfig.mode == .chunked, let chunked = producer as? any ChunkedPrefillRunner {
+        _ = try await chunked.prefillChunked(tokens: tokens, startPosition: position,
+                                             outputMode: .logits, config: prefillConfig,
+                                             into: scratch.logits) { _ in }
+        return
+    }
+    for token in tokens {
+        try Task.checkCancellation()
+        try await producer.produce(token: token, position: position, into: scratch.logits)
+        position += 1
+    }
 }
 
 /// Raw-completion prefill + decode loop shared by the CLI and the Mac app.

@@ -59,7 +59,7 @@ struct GFDetokenizer {
         if skipSpecialTokens, specialTokenIDs.contains(id) {
             return barrierTokenIDs.contains(id) ? commitHeld() : ""
         }
-        if dialect == .chatml {
+        if dialect == .chatml || dialect == .flint {
             return run.commit() + partial.pushByteLevelToken(token)
         }
         if let byte = GemmaDecoding.byteValue(token) {

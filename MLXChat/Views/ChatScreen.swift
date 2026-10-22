@@ -19,7 +19,7 @@ struct ChatScreen: View {
         let messages = conversation?.orderedMessages ?? []
         VStack(spacing: 0) {
             if messages.isEmpty {
-                WelcomeView(isEnabled: !chat.isSelectedModelPreparing) { template in
+                WelcomeView { template in
                     draft = template
                     composerFocused = true
                     moveComposerCursorToEnd()
@@ -41,7 +41,12 @@ struct ChatScreen: View {
                 Spacer(minLength: 0)
                 ModelPickerMenu()
                 if chat.selectedModelSupportsThinking {
-                    ThinkingToggle(canDisable: chat.selectedModelSupportsThinkingToggle)
+                    ThinkingToggle(
+                        canDisable: chat.selectedModelSupportsThinkingToggle,
+                        modelDisplayName: chat.selectedModelDisplayName
+                    ) { message, isEnabled in
+                        chat.showThinkingToast(message, enabled: isEnabled)
+                    }
                 }
                 PromptPresetMenu()
             }
@@ -55,8 +60,7 @@ struct ChatScreen: View {
         .overlay(alignment: .topLeading) {
             if let toast = chat.effectiveSwitchToast {
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.brandGreen)
+                    toastIcon(for: chat.switchToastStyle)
                     Text(toast)
                         .font(Studio.sans(14, weight: .semibold))
                 }
@@ -76,12 +80,38 @@ struct ChatScreen: View {
             userPausedAutoScroll = false
             userIsScrolling = false
             draft = ""
+            composerFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newChat)) { _ in
+            composerFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusComposer)) { _ in
+            composerFocused = true
+        }
+        .task {
+            // AppKit gives launch focus to the sidebar search field, which
+            // drops it after 0.3 s; then the composer takes it, so typing
+            // works as soon as the window shows.
+            try? await Task.sleep(for: .milliseconds(400))
+            composerFocused = true
         }
         .onChange(of: chat.streamingMessageID) {
             // Preserve an explicit user pause. A newly appended assistant row
             // can make geometry report "not at bottom" for one layout pass;
             // treating that transient state as intent is what caused bouncing.
             if atBottom { userPausedAutoScroll = false }
+        }
+    }
+
+    @ViewBuilder
+    private func toastIcon(for style: ChatController.ToastStyle) -> some View {
+        switch style {
+        case .modelSwitch:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.brandGreen)
+        case .thinking(let enabled):
+            Image(systemName: enabled ? "lightbulb.fill" : "lightbulb.slash")
+                .foregroundStyle(enabled ? Color.iconPurple : .secondary)
         }
     }
 
@@ -111,14 +141,18 @@ struct ChatScreen: View {
                 VStack(alignment: .leading, spacing: 24) {
                     ForEach(messages) { message in
                         let isStreamingThis = streamingMessageID == message.id
+                        let onRegenerate = regenerateAction(
+                            for: message, lastMessageID: lastMessageID)
                         MessageView(
                             message: message,
                             isStreamingThis: isStreamingThis,
                             isInThinkPhase: isStreamingThis && isInThinkPhase,
-                            isAnyStreaming: isAnyStreaming,
+                            // Only the regenerate button reads it; giving it to
+                            // every row re-rendered them all at send and finish.
+                            isAnyStreaming: onRegenerate != nil && isAnyStreaming,
                             modelDisplayName: message.modelID.map { chat.modelDisplayName(for: $0) },
-                            onRegenerate: regenerateAction(
-                                for: message, lastMessageID: lastMessageID))
+                            onRegenerate: onRegenerate)
+                            .equatable()
                             .id(message.id)
                     }
                     Color.clear.frame(height: 1).id("chat-bottom")
@@ -308,29 +342,31 @@ private struct EngineReadinessNotice: View {
 }
 
 /// Bulb toggle for thinking-capable models: lit purple when the model may
-/// think, slashed gray when thinking is switched off.
+/// think, slashed gray when thinking is switched off, and badged with a small
+/// lock when thinking cannot be switched off for the selected model.
 private struct ThinkingToggle: View {
     let canDisable: Bool
+    let modelDisplayName: String
+    let onFeedback: (String, Bool) -> Void
     @AppStorage(Keys.thinkingEnabled) private var enabled = Keys.Defaults.thinkingEnabled
 
     private var isEnabled: Bool { canDisable ? enabled : true }
 
-    @ViewBuilder
     var body: some View {
-        if canDisable {
-            Button {
+        Button {
+            if canDisable {
                 enabled.toggle()
-            } label: {
-                bulbIcon()
+                onFeedback(enabled ? "Thinking on" : "Thinking off", enabled)
+            } else {
+                onFeedback("Thinking is always on for \(modelDisplayName)", true)
             }
-            .buttonStyle(.plain)
-            .help(helpText)
-            .accessibilityLabel("Thinking")
-        } else {
+        } label: {
             bulbIcon()
-                .help(helpText)
-                .accessibilityLabel("Thinking is always on")
         }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(helpText)
+        .accessibilityLabel(canDisable ? "Thinking" : "Thinking is always on")
     }
 
     private func bulbIcon() -> some View {
@@ -338,10 +374,20 @@ private struct ThinkingToggle: View {
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(isEnabled ? Color.iconPurple : .secondary)
             .studioHeaderIconChip()
+            .overlay(alignment: .bottomTrailing) {
+                if !canDisable {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(Color.iconPurple)
+                        .padding(2)
+                        .background(Circle().fill(Color.cardFill))
+                        .offset(x: 2, y: 2)
+                }
+            }
     }
 
     private var helpText: String {
-        guard canDisable else { return "Thinking is always on for this model" }
+        guard canDisable else { return "Thinking is always on for \(modelDisplayName)" }
         return enabled
             ? "Thinking is on — click to turn off"
             : "Thinking is off — click to turn on"

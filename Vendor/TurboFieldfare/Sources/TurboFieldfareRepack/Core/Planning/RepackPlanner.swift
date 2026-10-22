@@ -213,9 +213,13 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
-        // LFM2's MLX conversion keeps the text model at the root (`model.*`)
-        // rather than under `language_model.`.
-        let languageModelPrefix = family == .lfm2moe ? "model." : "language_model."
+        // LFM2 and Flint keep the text model at the root (`model.*`). Flint's
+        // untied head is the root tensor `lm_head.weight`.
+        let languageModelPrefix = family == .lfm2moe || family == .flint
+            ? "model." : "language_model."
+        if family == .flint && name == "lm_head.weight" {
+            return .lmResident
+        }
         if name.hasPrefix(languageModelPrefix) {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
@@ -236,7 +240,7 @@ enum RepackPlanner {
         let routedContainer: String
         switch family {
         case .gemma4: routedContainer = ".experts.switch_glu."
-        case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .qwen36, .flint: routedContainer = ".mlp.switch_mlp."
         case .lfm2moe: routedContainer = ".feed_forward.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
@@ -314,7 +318,7 @@ enum RepackPlanner {
             // LFM2's leading dense-FFN layers own no experts. Only routed
             // layers are packed, numbered in order; the runtime maps model
             // layer L to packed layer L - numDenseLayers.
-            if arch.family == .lfm2moe {
+            if arch.family == .lfm2moe || arch.family == .flint {
                 if bundle.isEmpty { continue }
                 guard let gName = bundle["gate"], let uName = bundle["up"],
                       let dName = bundle["down"] else {
@@ -582,13 +586,16 @@ enum RepackPlanner {
             if n == "model.embed_tokens.weight"                 { return (0, 0, 0, n) }
             if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
             if n == "model.embedding_norm.weight"               { return (3, 0, 0, n) }
+            if n == "model.norm.weight"                         { return (3, 0, 0, n) }
             if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            if n == "lm_head.weight"                            { return (4, 0, 0, n) }
             if let li = layerIndex(in: n) {
                 let slot: Int
                 switch family {
                 case .gemma4: slot = slotRank(in: n)
                 case .qwen36: slot = qwenSlotRank(in: n)
                 case .lfm2moe: slot = lfmSlotRank(in: n)
+                case .flint: slot = flintSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -651,6 +658,29 @@ enum RepackPlanner {
         if n.contains(".feed_forward.down_proj.weight")  { return 13 }
         if n.hasSuffix(".operator_norm.weight")          { return 14 }
         if n.hasSuffix(".ffn_norm.weight")               { return 15 }
+        return 100
+    }
+
+    /// Within-layer slot order for Flint: attention, its norms and sink, then
+    /// the router or dense FFN, the shared expert, then the two layer norms.
+    private static func flintSlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight") { return 0 }
+        if n.contains(".self_attn.k_proj.weight") { return 1 }
+        if n.contains(".self_attn.v_proj.weight") { return 2 }
+        if n.contains(".self_attn.o_proj.weight") { return 3 }
+        if n.contains(".self_attn.q_norm.weight") { return 4 }
+        if n.contains(".self_attn.k_norm.weight") { return 5 }
+        if n.hasSuffix(".self_attn.softmax_offset") { return 6 }
+        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 10 }
+        if n.contains(".mlp.shared_expert.up_proj.weight") { return 11 }
+        if n.contains(".mlp.shared_expert.down_proj.weight") { return 12 }
+        if n.contains(".mlp.gate.weight") { return 7 }
+        if n.hasSuffix(".mlp.gate.expert_bias") { return 8 }
+        if n.contains(".mlp.gate_proj.weight") { return 13 }
+        if n.contains(".mlp.up_proj.weight") { return 14 }
+        if n.contains(".mlp.down_proj.weight") { return 15 }
+        if n.hasSuffix(".input_layernorm.weight") { return 16 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 17 }
         return 100
     }
 

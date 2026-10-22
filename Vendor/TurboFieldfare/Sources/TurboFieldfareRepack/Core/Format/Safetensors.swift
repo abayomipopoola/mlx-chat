@@ -68,19 +68,21 @@ enum Safetensors {
                 throw RepackError.safetensorsHeaderInvalid(path: path,
                                                            detail: "entry for \(name) has no dtype")
             }
-            let dtype: SourceTensor.Dtype
+            var dtype: SourceTensor.Dtype
+            let storedAsBytes: Bool
             switch dtypeStr {
-            case "U32":  dtype = .u32
-            case "BF16": dtype = .bf16
-            case "F16":  dtype = .fp16
-            case "F32":  dtype = .fp32
+            case "U32":  dtype = .u32; storedAsBytes = false
+            case "U8":   dtype = .u32; storedAsBytes = true
+            case "BF16": dtype = .bf16; storedAsBytes = false
+            case "F16":  dtype = .fp16; storedAsBytes = false
+            case "F32":  dtype = .fp32; storedAsBytes = false
             default: throw RepackError.safetensorsUnknownDtype(path: path, dtype: dtypeStr)
             }
             guard let shape = entry["shape"] as? [Any] else {
                 throw RepackError.safetensorsHeaderInvalid(path: path,
                                                            detail: "entry for \(name) has no shape")
             }
-            let shapeU64: [UInt64] = try shape.map { e in
+            var shapeU64: [UInt64] = try shape.map { e in
                 if let n = e as? NSNumber { return n.uint64Value }
                 if let n = e as? Int { return UInt64(n) }
                 throw RepackError.safetensorsHeaderInvalid(path: path,
@@ -99,6 +101,25 @@ enum Safetensors {
             if endAbs > fileSize {
                 throw RepackError.safetensorsTensorOutOfRange(path: path, name: name,
                                                               end: endAbs, fileSize: fileSize)
+            }
+            // MLX writes affine weights as raw bytes (U8) of the little-endian
+            // uint32 packing. Fold each 4 bytes back into one U32 so the
+            // planner's word-shaped logical dims stay correct. The byte
+            // check uses the stored width, before that fold.
+            let storedBytes: UInt64 = storedAsBytes ? 1 : UInt64(dtype.elementBytes)
+            let storedElements = shapeU64.reduce(UInt64(1), *)
+            if storedElements * storedBytes != size {
+                throw RepackError.shapeMismatch(name: name,
+                                                detail: "shape product \(storedElements)*\(storedBytes) != size \(size)")
+            }
+            if storedAsBytes {
+                guard name.hasSuffix(".weight"),
+                      let last = shapeU64.last, last % 4 == 0, !shapeU64.isEmpty else {
+                    throw RepackError.safetensorsHeaderInvalid(
+                        path: path,
+                        detail: "U8 tensor \(name) is not a packed weight row")
+                }
+                shapeU64[shapeU64.count - 1] = last / 4
             }
             let elemBytes = UInt64(dtype.elementBytes)
             let elements = shapeU64.reduce(UInt64(1), *)

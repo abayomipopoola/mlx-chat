@@ -55,6 +55,8 @@ final class StreamedMoEEngine: ChatEngine {
                 progress: progress)
             try Task.checkCancellation()
             session = candidate
+            // The first chat then starts after the system prompt.
+            await candidate.prewarm(systemPrompt: PromptBuilder.currentSystemPrompt())
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -66,6 +68,9 @@ final class StreamedMoEEngine: ChatEngine {
     func unload() {
         inFlightLoad?.cancel()
         inFlightLoad = nil
+        if let session {
+            Task { await session.cancelPrewarm() }
+        }
         session = nil
     }
 
@@ -122,6 +127,9 @@ private actor StreamedMoESession {
 
     private var loadedState: LoadedState?
     private var kvCache: StreamedMoEKVCacheState?
+    /// Feeds the system prompt after load. `generate` awaits it first: the
+    /// actor is reentrant, and both drive the same runner.
+    private var prewarmTask: Task<Void, Never>?
 
     func load(
         directory: URL,
@@ -160,7 +168,12 @@ private actor StreamedMoESession {
 
         progress(0.80)
         let runner: any ContinuableLogitProducer
-        if variant.architecture == .lfm2moe {
+        if variant.architecture == .flint {
+            runner = try FlintForwardRunner(
+                model: model,
+                context: context,
+                maxContext: settings.contextTokens)
+        } else if variant.architecture == .lfm2moe {
             runner = try LFM2MoEForwardRunner(
                 model: model,
                 context: context,
@@ -199,6 +212,10 @@ private actor StreamedMoESession {
         conversationID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async throws -> Double? {
+        if let prewarmTask {
+            await prewarmTask.value
+            self.prewarmTask = nil
+        }
         guard let loadedState else {
             throw EngineError.generationFailed("Model is not loaded.")
         }
@@ -214,8 +231,8 @@ private actor StreamedMoESession {
             throw EngineError.generationFailed("No pending user message.")
         }
 
-        let thinkingEnabled = loadedState.architecture.thinkingIsOptional
-            ? ThinkingPreference.isEnabled : true
+        let flint = loadedState.architecture == .flint
+        let thinkingEnabled = Self.thinkingEnabled(loadedState)
         let wantsImages = trimmed.contains { !$0.images.isEmpty }
         let multimodalInput: MultimodalPrefillInput?
         let promptIDs: [Int32]
@@ -228,12 +245,9 @@ private actor StreamedMoESession {
             promptIDs = input.effectiveTokenIDs
         } else {
             multimodalInput = nil
-            let rendered = try StreamedMoEPrompt.render(
-                tokenizer: tokenizer,
-                history: trimmed,
-                systemPrompt: systemPrompt,
-                thinkingEnabled: thinkingEnabled)
-            promptIDs = tokenizer.encode(rendered, addBOS: false)
+            promptIDs = try Self.textPromptIDs(loadedState, history: trimmed,
+                                               systemPrompt: systemPrompt,
+                                               thinkingEnabled: thinkingEnabled)
         }
         let maxNewTokens = min(8_192, loadedState.maxContext - promptIDs.count)
         guard maxNewTokens > 0 else {
@@ -243,26 +257,34 @@ private actor StreamedMoESession {
 
         var eventRouter = StreamedMoEEventRouter(
             tokenizer: tokenizer,
-            thinkingEnabled: thinkingEnabled)
+            thinkingEnabled: flint ? true : thinkingEnabled)
         let config = GenerationConfig(
             maxNewTokens: maxNewTokens,
             temperature: Float(max(temperature, 0)),
-            topK: 64,
+            topK: flint ? 20 : 64,
             topP: 0.95)
 
+        let allowsRewind = Self.allowsRewind(runner)
         var start = StreamedMoEKVReusePolicy.start(
             newPromptIDs: promptIDs,
             cache: kvCache,
             conversationID: conversationID,
             systemPrompt: systemPrompt,
             thinkingEnabled: thinkingEnabled,
-            allowsRewind: runner is LFM2MoEForwardRunner)
+            allowsRewind: allowsRewind)
         if multimodalInput != nil { start = .reset }
-        // The LFM2 runner feeds the prompt one token at a time.
-        let prefillConfig: PrefillRuntimeConfig = loadedState.architecture == .lfm2moe
-            ? .off : .defaultChunked
+        // Flint's sliding layers keep a bounded ring, so a deep rewind must
+        // start over instead.
+        if case .resume(let cached) = start, let flint = runner as? FlintForwardRunner,
+           flint.continuationPosition - cached > flint.maxRewindDistance {
+            start = .reset
+        }
+        // Flint and LFM2 feed the prompt one token at a time inside their
+        // chunked prefill, running the output head only on the last token.
+        let prefillConfig = PrefillRuntimeConfig.defaultChunked
 
         let result: RawDecodeResult
+        var lastPrefillEvent = Date.distantPast
         do {
             result = try await runRawCompletion(
                 producer: runner,
@@ -276,14 +298,30 @@ private actor StreamedMoESession {
                 start: start
             ) { progress in
                 switch progress {
-                case .prefill:
-                    break
+                case .prefill(let done, let total):
+                    let now = Date()
+                    if done >= total || now.timeIntervalSince(lastPrefillEvent) >= 0.1 {
+                        lastPrefillEvent = now
+                        onEvent(.prefill(done: done, total: total))
+                    }
                 case .token(_, let tokenID, let delta):
                     eventRouter.consume(tokenID: tokenID, delta: delta, emit: onEvent)
                 case .tail(let text):
                     eventRouter.consumeTail(text, emit: onEvent)
                 }
             }
+        } catch is CancellationError where allowsRewind && multimodalInput == nil {
+            // Stop lands between tokens, so a rewindable runner still holds a
+            // valid prefix of this prompt. Keep it for the next turn.
+            let fed = min(runner.continuationPosition, promptIDs.count)
+            kvCache = fed > 0
+                ? StreamedMoEKVCacheState(
+                    conversationID: conversationID,
+                    systemPrompt: systemPrompt,
+                    thinkingEnabled: thinkingEnabled,
+                    kvTokenIDs: Array(promptIDs.prefix(fed)))
+                : nil
+            throw CancellationError()
         } catch {
             kvCache = nil
             throw error
@@ -299,6 +337,77 @@ private actor StreamedMoESession {
         return result.decodeSeconds > 0
             ? Double(result.newTokens) / result.decodeSeconds
             : nil
+    }
+
+    /// Starts feeding the part of every text prompt that comes before the
+    /// user's words (the system prompt and the user-turn header), so the first
+    /// chat resumes after it. Only runners that can rewind take part: their
+    /// cache serves any conversation that shares those tokens.
+    func prewarm(systemPrompt: String) {
+        guard let state = loadedState, Self.allowsRewind(state.runner),
+              prewarmTask == nil else { return }
+        let thinkingEnabled = Self.thinkingEnabled(state)
+        func ids(_ text: String) throws -> [Int32] {
+            try Self.textPromptIDs(state, history: [EngineMessage(role: .user, text: text)],
+                                   systemPrompt: systemPrompt,
+                                   thinkingEnabled: thinkingEnabled)
+        }
+        guard let first = try? ids("a"), let second = try? ids("z") else { return }
+        let shared = zip(first, second).prefix { $0 == $1 }.count
+        guard shared > 0 else { return }
+        let prefix = Array(first.prefix(shared))
+        if let kvCache, kvCache.kvTokenIDs.starts(with: prefix) { return }
+        prewarmTask = Task {
+            await self.runPrewarm(prefix: prefix, state: state, systemPrompt: systemPrompt,
+                                  thinkingEnabled: thinkingEnabled)
+        }
+    }
+
+    /// Stops warming between prompt tokens, so an unloaded model frees soon.
+    func cancelPrewarm() {
+        prewarmTask?.cancel()
+    }
+
+    private func runPrewarm(prefix: [Int32], state: LoadedState, systemPrompt: String,
+                            thinkingEnabled: Bool) async {
+        do {
+            try await runRawPrefill(producer: state.runner, promptIds: prefix,
+                                    scratch: state.scratch)
+            kvCache = StreamedMoEKVCacheState(
+                conversationID: UUID(),
+                systemPrompt: systemPrompt,
+                thinkingEnabled: thinkingEnabled,
+                kvTokenIDs: prefix)
+        } catch {
+            kvCache = nil
+        }
+    }
+
+    private static func allowsRewind(_ runner: any ContinuableLogitProducer) -> Bool {
+        runner is LFM2MoEForwardRunner || runner is FlintForwardRunner
+    }
+
+    private static func thinkingEnabled(_ state: LoadedState) -> Bool {
+        state.architecture == .flint ? false : (
+            state.architecture.thinkingIsOptional ? ThinkingPreference.isEnabled : true)
+    }
+
+    private static func textPromptIDs(_ state: LoadedState,
+                                      history: [EngineMessage],
+                                      systemPrompt: String,
+                                      thinkingEnabled: Bool) throws -> [Int32] {
+        let rendered = state.architecture == .flint
+            ? GFTokenizer.flintPrompt(
+                turns: history.map {
+                    ($0.role == .assistant ? "assistant" : "user", $0.text)
+                },
+                system: systemPrompt)
+            : try StreamedMoEPrompt.render(
+                tokenizer: state.tokenizer,
+                history: history,
+                systemPrompt: systemPrompt,
+                thinkingEnabled: thinkingEnabled)
+        return state.tokenizer.encode(rendered, addBOS: false)
     }
 
     private func encodeMultimodalPrompt(
@@ -391,37 +500,52 @@ private actor StreamedMoESession {
 /// token by ID and synthesize its marker for the shared text filter.
 struct StreamedMoEEventRouter {
     private var router: ThinkingEventRouter
+    private let thoughtOpenID: Int32
+    private let thoughtOpenMarker: String
     private let thoughtCloseID: Int32
     private let thoughtCloseMarker: String
     private var awaitingThoughtClose: Bool
+    private var leadingOpenBuffer: String?
 
     init(tokenizer: GFTokenizer, thinkingEnabled: Bool) {
-        let route: (config: ThinkingConfig, closeID: Int32)
         switch tokenizer.dialect {
         case .gemma:
-            route = (.gemmaChannel, tokenizer.channelEndID)
+            self.init(
+                thinkingConfig: .gemmaChannel,
+                thinkingEnabled: thinkingEnabled,
+                thoughtCloseID: tokenizer.channelEndID)
         case .chatml:
-            route = (
-                .thinkTags(startsInside: true, toggleable: true),
-                tokenizer.thinkEndID ?? tokenizer.channelEndID)
+            self.init(
+                thinkingConfig: .thinkTags(startsInside: true, toggleable: true),
+                thinkingEnabled: thinkingEnabled,
+                thoughtCloseID: tokenizer.thinkEndID ?? tokenizer.channelEndID)
+        case .flint:
+            self.init(
+                thinkingConfig: .thinkTags(startsInside: false, toggleable: false),
+                thinkingEnabled: true,
+                thoughtOpenID: tokenizer.thinkStartID ?? -1,
+                thoughtCloseID: tokenizer.thinkEndID ?? -1,
+                preopened: true)
         }
-        self.init(
-            thinkingConfig: route.config,
-            thinkingEnabled: thinkingEnabled,
-            thoughtCloseID: route.closeID)
     }
 
     init(
         thinkingConfig: ThinkingConfig,
         thinkingEnabled: Bool,
-        thoughtCloseID: Int32
+        thoughtOpenID: Int32 = -1,
+        thoughtCloseID: Int32,
+        preopened: Bool? = nil
     ) {
+        let opened = preopened ?? thinkingEnabled
+        self.thoughtOpenID = thoughtOpenID
+        self.thoughtOpenMarker = thinkingConfig.open
         self.thoughtCloseID = thoughtCloseID
-        thoughtCloseMarker = thinkingConfig.close
+        self.thoughtCloseMarker = thinkingConfig.close
         router = ThinkingEventRouter(filter: thinkingConfig.makeFilter(
             enabled: thinkingEnabled,
-            preopened: thinkingEnabled))
-        awaitingThoughtClose = thinkingEnabled
+            preopened: opened))
+        awaitingThoughtClose = opened
+        leadingOpenBuffer = (opened && !thinkingConfig.startsInside && !thinkingConfig.open.isEmpty) ? "" : nil
     }
 
     mutating func consume(
@@ -429,19 +553,84 @@ struct StreamedMoEEventRouter {
         delta: String,
         emit: (EngineEvent) -> Void
     ) {
-        if awaitingThoughtClose, tokenID == thoughtCloseID {
+        var effectiveDelta = delta
+        if let pendingOpen = leadingOpenBuffer {
+            if !thoughtOpenMarker.isEmpty,
+               thoughtOpenID >= 0,
+               tokenID == thoughtOpenID {
+                leadingOpenBuffer = nil
+                let combined = pendingOpen + delta
+                let trimmed = String(combined.drop(while: { $0.isWhitespace }))
+                if trimmed.hasPrefix(thoughtOpenMarker) {
+                    effectiveDelta = String(trimmed.dropFirst(thoughtOpenMarker.count))
+                } else {
+                    effectiveDelta = combined
+                }
+            } else if !thoughtCloseMarker.isEmpty,
+                      thoughtCloseID >= 0,
+                      tokenID == thoughtCloseID {
+                leadingOpenBuffer = nil
+                if !pendingOpen.isEmpty {
+                    router.consume(pendingOpen, emit: emit)
+                }
+            } else {
+                let combined = pendingOpen + delta
+                let trimmed = String(combined.drop(while: { $0.isWhitespace }))
+                if trimmed.isEmpty {
+                    leadingOpenBuffer = combined
+                    return
+                } else if trimmed.hasPrefix(thoughtOpenMarker) {
+                    leadingOpenBuffer = nil
+                    effectiveDelta = String(trimmed.dropFirst(thoughtOpenMarker.count))
+                } else if thoughtOpenMarker.hasPrefix(trimmed) {
+                    leadingOpenBuffer = combined
+                    return
+                } else {
+                    leadingOpenBuffer = nil
+                    effectiveDelta = combined
+                }
+            }
+        }
+
+        if router.isPending,
+           !thoughtOpenMarker.isEmpty,
+           thoughtOpenID >= 0,
+           tokenID == thoughtOpenID {
+            let piece = effectiveDelta.contains(thoughtOpenMarker)
+                ? effectiveDelta : effectiveDelta + thoughtOpenMarker
+            router.consume(piece, emit: emit)
+            awaitingThoughtClose = router.isThinking
+        } else if (awaitingThoughtClose || router.isThinking),
+                  !thoughtCloseMarker.isEmpty,
+                  thoughtCloseID >= 0,
+                  tokenID == thoughtCloseID {
             awaitingThoughtClose = false
-            router.consume(thoughtCloseMarker, emit: emit)
+            let piece = effectiveDelta.contains(thoughtCloseMarker)
+                ? effectiveDelta : effectiveDelta + thoughtCloseMarker
+            router.consume(piece, emit: emit)
         } else {
-            router.consume(delta, emit: emit)
+            router.consume(effectiveDelta, emit: emit)
+            if router.isThinking {
+                awaitingThoughtClose = true
+            }
         }
     }
 
     mutating func consumeTail(_ text: String, emit: (EngineEvent) -> Void) {
+        if let pendingOpen = leadingOpenBuffer {
+            leadingOpenBuffer = nil
+            router.consume(pendingOpen + text, emit: emit)
+            return
+        }
         router.consume(text, emit: emit)
     }
 
     mutating func finish(emit: (EngineEvent) -> Void) {
+        if let pendingOpen = leadingOpenBuffer, !pendingOpen.isEmpty {
+            leadingOpenBuffer = nil
+            router.consume(pendingOpen, emit: emit)
+        }
+        leadingOpenBuffer = nil
         router.finish(emit: emit)
     }
 }
@@ -485,6 +674,12 @@ enum StreamedMoEPrompt {
                     history: history,
                     systemPrompt: systemPrompt,
                     family: tokenizer.chatMLFamily ?? .qwen)
+            case .flint:
+                return GFTokenizer.flintPrompt(
+                    turns: history.map {
+                        ($0.role == .assistant ? "assistant" : "user", $0.text)
+                    },
+                    system: systemPrompt)
             }
         }
 

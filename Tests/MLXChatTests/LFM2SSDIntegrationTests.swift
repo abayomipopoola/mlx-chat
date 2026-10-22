@@ -156,10 +156,125 @@ import TurboFieldfare
             case .delta(let delta): content += delta
             case .thinkingDelta(let delta): thinking += delta
             case .thinkingReclassified: thinking = ""
+            case .prefill: break
             case .completed: break
             }
         }
         print("LFM2 SSD app answer: \(content.prefix(80)) | thought \(thinking.count) chars")
         #expect(content.contains("42"), "answered: \(content.prefix(200))")
+    }
+
+    /// Batched prefill against token-by-token `produce` on a long prompt:
+    /// last-token logits and greedy continuation; chunk sizes agree exactly.
+    @Test(.timeLimit(.minutes(30)))
+    func batchedPrefillMatchesTokenByToken() async throws {
+        guard Self.enabled,
+              FileManager.default.fileExists(
+                atPath: Self.ssdDirectory.appendingPathComponent("manifest.json").path)
+        else { return }
+        let tokenizer = try await GFTokenizer.load(forModelDirectory: Self.ssdDirectory)
+        let prompt = StreamedMoEPrompt.renderChatMLThinkingPrompt(
+            history: [EngineMessage(role: .user, text: "Summarise this text.\n\n"
+                                    + FlintSSDBenchmarkTests.longText(words: 1_100))],
+            systemPrompt: "You are a helpful assistant.", family: .lfm)
+        let ids = tokenizer.encode(prompt, addBOS: false)
+        let context = try MetalContext()
+        let model = try Model.load(directoryURL: Self.ssdDirectory, device: context.device,
+                                   streamingMode: .pread(slotCount: 16),
+                                   integrityPolicy: .sizeCheckTrustedReceipt)
+        let vocab = model.config.vocabSize
+        func makeScratch() throws -> RawCompletionScratch {
+            try RawCompletionScratch(context: context, vocab: vocab,
+                                     logitSoftcap: Float(model.config.finalLogitSoftcap))
+        }
+        func read(_ buffer: MTLBuffer) -> [Float] {
+            let p = buffer.contents().assumingMemoryBound(to: Float16.self)
+            return (0..<vocab).map { Float(p[$0]) }
+        }
+        func argmax(_ x: [Float]) -> Int32 { Int32(x.indices.max { x[$0] < x[$1] }!) }
+        func greedy(_ runner: LFM2MoEForwardRunner, from start: [Float], steps: Int) async throws -> [Int32] {
+            let logits = try #require(context.device.makeBuffer(length: vocab * 2, options: .storageModeShared))
+            var tokens: [Int32] = []
+            var current = argmax(start)
+            for _ in 0..<steps {
+                tokens.append(current)
+                try await runner.produce(token: current, position: runner.continuationPosition,
+                                         into: logits)
+                current = argmax(read(logits))
+            }
+            return tokens
+        }
+
+        let reference = try LFM2MoEForwardRunner(model: model, context: context, maxContext: 4_096)
+        let referenceLogits = try #require(context.device.makeBuffer(length: vocab * 2, options: .storageModeShared))
+        let referenceStart = Date()
+        for (position, token) in ids.enumerated() {
+            try await reference.produce(token: token, position: position, into: referenceLogits)
+        }
+        let referenceSeconds = Date().timeIntervalSince(referenceStart)
+        var batched: [Int: (runner: LFM2MoEForwardRunner, logits: [Float], seconds: Double)] = [:]
+        let chunks = (ProcessInfo.processInfo.environment["MLXCHAT_LFM_PREFILL_CHUNKS"] ?? "2048,64,17")
+            .split(separator: ",").compactMap { Int($0) }
+        for chunk in chunks {
+            let runner = try LFM2MoEForwardRunner(model: model, context: context, maxContext: 4_096)
+            runner.prefillChunkTokens = chunk
+            runner.usesTensorQMM = ProcessInfo.processInfo.environment["MLXCHAT_LFM_PREFILL_TENSOR"] != "0"
+            if let exact = ProcessInfo.processInfo.environment["MLXCHAT_LFM_PREFILL_EXACT"] {
+                runner.exactQMMKinds = Set(exact.split(separator: ",").map(String.init))
+            }
+            let scratch = try makeScratch()
+            let started = Date()
+            try await runRawPrefill(producer: runner, promptIds: ids, scratch: scratch)
+            batched[chunk] = (runner, read(scratch.logitsBuffer), Date().timeIntervalSince(started))
+        }
+        let main = try #require(batched[2_048])
+        var layerReport: [String] = []
+        for layer in 0..<model.config.numLayers {
+            var maxError: Float = 0, sum: Float = 0, n = 0
+            let positions: [Int?] = model.config.layerIsShortConv(layer)
+                ? [nil] : Array(max(0, ids.count - 400)..<ids.count)
+            for position in positions {
+                guard let x = reference.debugCacheRow(layer: layer, position: position),
+                      let y = main.runner.debugCacheRow(layer: layer, position: position) else { continue }
+                for i in x.indices {
+                    let e = abs(Float(x[i]) - Float(y[i]))
+                    maxError = max(maxError, e); sum += e; n += 1
+                }
+            }
+            if n > 0 {
+                layerReport.append("L\(layer)\(model.config.layerIsShortConv(layer) ? "c" : "a") \(String(format: "%.3f/%.4f", maxError, sum / Float(n)))")
+            }
+        }
+        print("LFM_PREFILL_CHECK layers (max/mean): " + layerReport.joined(separator: ", "))
+        let a = read(referenceLogits)
+        let b = main.logits
+        func top(_ x: [Float], _ k: Int) -> [Int] { Array(x.indices.sorted { x[$0] > x[$1] }.prefix(k)) }
+        let overlap = Set(top(a, 5)).intersection(top(b, 5)).count
+        let meanA = a.reduce(0, +) / Float(vocab), meanB = b.reduce(0, +) / Float(vocab)
+        var cov: Float = 0, varA: Float = 0, varB: Float = 0
+        for i in a.indices {
+            cov += (a[i] - meanA) * (b[i] - meanB)
+            varA += (a[i] - meanA) * (a[i] - meanA)
+            varB += (b[i] - meanB) * (b[i] - meanB)
+        }
+        let correlation = cov / (varA.squareRoot() * varB.squareRoot())
+        let referenceGreedy = try await greedy(reference, from: a, steps: 32)
+        let batchedGreedy = try await greedy(main.runner, from: b, steps: 32)
+        let matching = zip(referenceGreedy, batchedGreedy).prefix { $0 == $1 }.count
+        print("""
+            LFM_PREFILL_CHECK \(ids.count) tokens; token-by-token \(String(format: "%.1f", Double(ids.count) / referenceSeconds)) tok/s, \
+            batched 2048 \(String(format: "%.1f", Double(ids.count) / main.seconds)) tok/s, \
+            others \(batched.filter { $0.key != 2_048 }.map { "\($0.key): \(String(format: "%.1f", Double(ids.count) / $0.value.seconds))" }.joined(separator: " "))
+            LFM_PREFILL_CHECK logits: top1 \(top(a, 1)) vs \(top(b, 1)), top5 overlap \(overlap)/5, correlation \(correlation), greedy match \(matching)/32, finite \(b.allSatisfy(\.isFinite))
+            LFM_PREFILL_CHECK chunks equal: \(batched.filter { $0.key != 2_048 }.map { "\($0.key) \($0.value.logits == b)" }.joined(separator: ", "))
+            LFM_PREFILL_CHECK reference text: \(tokenizer.decode(referenceGreedy).debugDescription)
+            LFM_PREFILL_CHECK batched text:   \(tokenizer.decode(batchedGreedy).debugDescription)
+            """)
+        #expect(top(a, 1) == top(b, 1))
+        #expect(overlap >= 4)
+        #expect(correlation > 0.99)
+        for (chunk, run) in batched where chunk != 2_048 {
+            #expect(run.logits == b, "chunk \(chunk) differs")
+        }
     }
 }

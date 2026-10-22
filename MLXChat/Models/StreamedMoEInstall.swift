@@ -5,18 +5,31 @@ enum StreamedMoEArchitecture: String, Hashable, Sendable {
     case gemma4
     case qwen36
     case lfm2moe
+    case flint
 
     var expectedArchitecture: ArchConfig {
         switch self {
         case .gemma4: .gemma4_26B_A4B
         case .qwen36: .qwen36_35B_A3B
         case .lfm2moe: .lfm25_24B_A2B
+        case .flint: .flint_40B_A2_5B
         }
     }
 
-    /// LFM2's template always opens a thought span, so thinking cannot be
-    /// switched off for it.
-    var thinkingIsOptional: Bool { self != .lfm2moe }
+    /// LFM2 and Flint do not have a prompt switch to disable thinking.
+    var thinkingIsOptional: Bool { self != .lfm2moe && self != .flint }
+
+    /// RAM one expert-cache slot takes once filled: one packed expert in every
+    /// routed layer of the pinned checkpoint. LFM2.5's experts are three
+    /// times Flint's, so the same slot count costs three times the RAM.
+    var expertCacheBytesPerSlot: UInt64 {
+        switch self {
+        case .gemma4: 30 * 3_358_720
+        case .qwen36: 40 * 1_769_472
+        case .lfm2moe: 38 * 5_308_416
+        case .flint: 47 * 1_769_472
+        }
+    }
 }
 
 struct StreamedMoEVariant: Identifiable, Hashable, Sendable {
@@ -185,7 +198,19 @@ enum StreamedMoEInstall {
         approximateDownloadBytes: 13_585_182_789,
         architecture: .lfm2moe)
 
-    static let variants = [standard, qat, qwen36, ornith15, lfm25]
+    static let flint = StreamedMoEVariant(
+        modelID: "streamed-moe/flint-40b-a2.5b-4bit",
+        sourceRepoID: "RecursiveSI/flint-int4",
+        sourceRevision: "3b93f9053b530488405ae9fca51d4900d6ce21f0",
+        sourceIndexSHA256: "5638b87fac6571726a7d5be1b91371b91f535a2b9aeb632c6362d15e1e084730",
+        displayName: "Flint 40B A2.5B",
+        quantLabel: "4-bit · SSD",
+        helperModelArgument: "flint",
+        managedDirectoryName: "Flint-40B-A2.5B.gturbo",
+        approximateDownloadBytes: 22_579_791_728,
+        architecture: .flint)
+
+    static let variants = [standard, qat, qwen36, ornith15, lfm25, flint]
 
     /// Bookmark key used by the first streamed-MoE build, before the streamed
     /// install received its own app-local identity.

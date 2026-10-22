@@ -49,6 +49,9 @@ struct ThinkTagFilter {
         self.init(open: "", close: "", startsInside: false, mayEmit: false)
     }
 
+    var isPending: Bool { mode == .pending }
+    var isThinking: Bool { mode == .thinking }
+
     mutating func consume(_ chunk: String) -> (thinking: String, content: String) {
         var input = chunk
 
@@ -148,6 +151,9 @@ struct ThinkingEventRouter {
     init(filter: ThinkTagFilter) {
         self.filter = filter
     }
+
+    var isPending: Bool { filter.isPending }
+    var isThinking: Bool { filter.isThinking }
 
     mutating func consume(_ text: String, emit: (EngineEvent) -> Void) {
         guard !text.isEmpty else { return }

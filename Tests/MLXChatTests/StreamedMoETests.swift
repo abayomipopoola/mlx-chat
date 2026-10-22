@@ -44,15 +44,19 @@ import TurboFieldfare
     }
 
     @Test func ssdOptionIsAvailableForAllPinnedMoESources() {
-        #expect(StreamedMoEInstall.variants.count == 5)
+        #expect(StreamedMoEInstall.variants.count == 6)
         for variant in StreamedMoEInstall.variants {
             #expect(StreamedMoEInstall.supportsSSDStreaming(
                 sourceModelID: variant.sourceRepoID))
             #expect(StreamedMoEInstall.variant(
                 forStreamedModelID: variant.modelID) == variant)
             #expect(variant.modelID != variant.sourceRepoID)
-            #expect(ModelDownloadMode.availableModes(
-                for: variant.sourceRepoID) == [.mlx, .ssdStreamed])
+            let modes = ModelDownloadMode.availableModes(for: variant.sourceRepoID)
+            if variant.architecture == .flint {
+                #expect(modes == [.ssdStreamed])
+            } else {
+                #expect(modes == [.mlx, .ssdStreamed])
+            }
         }
         #expect(!StreamedMoEInstall.supportsSSDStreaming(
             sourceModelID: "mlx-community/gemma-4-12B-it-4bit"))
@@ -73,6 +77,9 @@ import TurboFieldfare
         #expect(StreamedMoEInstall.lfm25.architecture == .lfm2moe)
         #expect(StreamedMoEInstall.lfm25.helperModelArgument == "lfm25")
         #expect(!StreamedMoEInstall.lfm25.architecture.thinkingIsOptional)
+        #expect(StreamedMoEInstall.flint.architecture == .flint)
+        #expect(StreamedMoEInstall.flint.helperModelArgument == "flint")
+        #expect(!StreamedMoEInstall.flint.architecture.thinkingIsOptional)
         #expect(!StreamedMoEInstall.supportsSSDStreaming(
             sourceModelID: "LiquidAI/LFM2.5-2.6B-MLX"))
         #expect(ModelDownloadMode.defaultMode == .mlx)
@@ -273,7 +280,7 @@ import TurboFieldfare
             decoding: output.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self)
         #expect(process.terminationStatus == 0)
-        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>"))
+        #expect(text.contains("--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25|flint>"))
         #expect(text.contains("--dry-run"))
         #expect(text.contains("--write-vision"))
         #expect(text.contains("--text-model <text.gturbo>"))
@@ -356,6 +363,36 @@ import TurboFieldfare
         #expect(!prompt.hasSuffix("</think>"))
     }
 
+    @Test func flintPromptUsesRoleMarkersAndDoesNotOpenAThought() {
+        let prompt = GFTokenizer.flintPrompt(
+            turns: [
+                ("user", " First question "),
+                ("assistant", "First answer"),
+                ("user", "Follow-up"),
+            ],
+            system: " Be concise. ")
+        #expect(prompt == "<|system|>Be concise.<|user|>First question<|assistant|>First answer<|user|>Follow-up<|assistant|>")
+        #expect(!prompt.contains("<think>"))
+    }
+
+    @Test func flintMultiTurnPromptMatchesTurnOnePrefixByteForByte() {
+        let turn1 = GFTokenizer.flintPrompt(
+            turns: [("user", "First question")],
+            system: "Be concise.")
+        let generatedAnswer = "First answer"
+        let turn2 = GFTokenizer.flintPrompt(
+            turns: [
+                ("user", "First question"),
+                ("assistant", "  First answer\n"),
+                ("user", "Follow-up"),
+            ],
+            system: "Be concise.")
+
+        let turn1WithAnswer = turn1 + generatedAnswer
+        #expect(turn2.hasPrefix(turn1WithAnswer))
+        #expect(turn2 == turn1WithAnswer + "<|user|>Follow-up<|assistant|>")
+    }
+
     @Test func lfmThinkingPromptStartsWithBOSAndMatchesLFMGenerationPrompt() {
         let prompt = StreamedMoEPrompt.renderChatMLThinkingPrompt(
             history: [EngineMessage(role: .user, text: " Hi ")],
@@ -394,6 +431,7 @@ import TurboFieldfare
             case .thinkingDelta(let delta): thinking += delta
             case .delta(let delta): content += delta
             case .thinkingReclassified: reclassified = true
+            case .prefill: break
             case .completed: break
             }
         }
@@ -444,6 +482,7 @@ import TurboFieldfare
             case .thinkingDelta(let delta): thinking += delta
             case .delta(let delta): content += delta
             case .thinkingReclassified: reclassified = true
+            case .prefill: break
             case .completed: break
             }
         }
@@ -456,5 +495,215 @@ import TurboFieldfare
         #expect(thinking == "Compare the options.")
         #expect(content == "The answer is 42.")
         #expect(!reclassified)
+    }
+
+    @Test func flintEventRouterSplitsThoughtFromAnswerForTokenIDsAndChunkSplits() {
+        let thinkStartID: Int32 = 150_006
+        let thinkEndID: Int32 = 150_007
+        let config = ThinkingConfig.thinkTags(startsInside: false, toggleable: false)
+
+        // 1. Stripped token IDs (empty delta on both <think> and </think>)
+        do {
+            var router = StreamedMoEEventRouter(
+                thinkingConfig: config,
+                thinkingEnabled: true,
+                thoughtOpenID: thinkStartID,
+                thoughtCloseID: thinkEndID,
+                preopened: false)
+            var thinking = ""
+            var content = ""
+            var reclassified = false
+            func collect(_ event: EngineEvent) {
+                switch event {
+                case .thinkingDelta(let d): thinking += d
+                case .delta(let d): content += d
+                case .thinkingReclassified: reclassified = true
+                case .prefill: break
+                case .completed: break
+                }
+            }
+            router.consume(tokenID: thinkStartID, delta: "", emit: collect)
+            router.consume(tokenID: 10, delta: "Draft the steps.", emit: collect)
+            router.consume(tokenID: thinkEndID, delta: "", emit: collect)
+            router.consume(tokenID: 11, delta: "Final answer.", emit: collect)
+            router.finish(emit: collect)
+
+            #expect(thinking == "Draft the steps.")
+            #expect(content == "Final answer.")
+            #expect(!reclassified)
+        }
+
+        // 2. Non-stripped ordinary tokens (delta carries <think> and </think>)
+        do {
+            var router = StreamedMoEEventRouter(
+                thinkingConfig: config,
+                thinkingEnabled: true,
+                thoughtOpenID: thinkStartID,
+                thoughtCloseID: thinkEndID,
+                preopened: false)
+            var thinking = ""
+            var content = ""
+            var reclassified = false
+            func collect(_ event: EngineEvent) {
+                switch event {
+                case .thinkingDelta(let d): thinking += d
+                case .delta(let d): content += d
+                case .thinkingReclassified: reclassified = true
+                case .prefill: break
+                case .completed: break
+                }
+            }
+            router.consume(tokenID: thinkStartID, delta: "<think>", emit: collect)
+            router.consume(tokenID: 10, delta: "Reason first.", emit: collect)
+            router.consume(tokenID: thinkEndID, delta: "</think>", emit: collect)
+            router.consume(tokenID: 11, delta: "\nVisible reply.", emit: collect)
+            router.finish(emit: collect)
+
+            #expect(thinking == "Reason first.")
+            #expect(content == "\nVisible reply.")
+            #expect(!reclassified)
+        }
+
+        // 3. <think> and </think> split at every possible chunk offset
+        let openTag = "<think>"
+        let closeTag = "</think>"
+        let thoughtBody = "Check edge cases."
+        let answerBody = "Done."
+        for openSplit in 1..<openTag.count {
+            for closeSplit in 1..<closeTag.count {
+                for preopened in [false, true] {
+                    var router = StreamedMoEEventRouter(
+                        thinkingConfig: config,
+                        thinkingEnabled: true,
+                        thoughtOpenID: thinkStartID,
+                        thoughtCloseID: thinkEndID,
+                        preopened: preopened)
+                    var thinking = ""
+                    var content = ""
+                    var reclassified = false
+                    func collect(_ event: EngineEvent) {
+                        switch event {
+                        case .thinkingDelta(let d): thinking += d
+                        case .delta(let d): content += d
+                        case .thinkingReclassified: reclassified = true
+                        case .prefill: break
+                        case .completed: break
+                        }
+                    }
+                    let openIdx = openTag.index(openTag.startIndex, offsetBy: openSplit)
+                    let closeIdx = closeTag.index(closeTag.startIndex, offsetBy: closeSplit)
+                    router.consume(tokenID: 1, delta: String(openTag[..<openIdx]), emit: collect)
+                    router.consume(tokenID: 2, delta: String(openTag[openIdx...]), emit: collect)
+                    router.consume(tokenID: 3, delta: thoughtBody, emit: collect)
+                    router.consume(tokenID: 4, delta: String(closeTag[..<closeIdx]), emit: collect)
+                    router.consume(tokenID: 5, delta: String(closeTag[closeIdx...]) + "\n" + answerBody, emit: collect)
+                    router.finish(emit: collect)
+
+                    #expect(thinking == thoughtBody)
+                    #expect(content == answerBody)
+                    #expect(!reclassified)
+                }
+            }
+        }
+
+        // 4. Preopened Flint stream where model omits <think> and closes with </think>
+        do {
+            var router = StreamedMoEEventRouter(
+                thinkingConfig: config,
+                thinkingEnabled: true,
+                thoughtOpenID: thinkStartID,
+                thoughtCloseID: thinkEndID,
+                preopened: true)
+            var thinking = ""
+            var content = ""
+            var reclassified = false
+            func collect(_ event: EngineEvent) {
+                switch event {
+                case .thinkingDelta(let d): thinking += d
+                case .delta(let d): content += d
+                case .thinkingReclassified: reclassified = true
+                case .prefill: break
+                case .completed: break
+                }
+            }
+            router.consume(tokenID: 10, delta: "The user is asking how many r's are in Strawberry.", emit: collect)
+            router.consume(tokenID: thinkEndID, delta: "", emit: collect)
+            router.consume(tokenID: 11, delta: "There are 3 r's in Strawberry.", emit: collect)
+            router.finish(emit: collect)
+
+            #expect(thinking == "The user is asking how many r's are in Strawberry.")
+            #expect(content == "There are 3 r's in Strawberry.")
+            #expect(!content.contains("</think>"))
+            #expect(!reclassified)
+        }
+
+        // 5. Preopened Flint stream where model emits <think> token ID and </think> token ID
+        do {
+            var router = StreamedMoEEventRouter(
+                thinkingConfig: config,
+                thinkingEnabled: true,
+                thoughtOpenID: thinkStartID,
+                thoughtCloseID: thinkEndID,
+                preopened: true)
+            var thinking = ""
+            var content = ""
+            var reclassified = false
+            func collect(_ event: EngineEvent) {
+                switch event {
+                case .thinkingDelta(let d): thinking += d
+                case .delta(let d): content += d
+                case .thinkingReclassified: reclassified = true
+                case .prefill: break
+                case .completed: break
+                }
+            }
+            router.consume(tokenID: thinkStartID, delta: "", emit: collect)
+            router.consume(tokenID: 10, delta: "Count each r carefully.", emit: collect)
+            router.consume(tokenID: thinkEndID, delta: "", emit: collect)
+            router.consume(tokenID: 11, delta: "There are 3 r's.", emit: collect)
+            router.finish(emit: collect)
+
+            #expect(thinking == "Count each r carefully.")
+            #expect(content == "There are 3 r's.")
+            #expect(!reclassified)
+        }
+
+        // 6. Preopened Flint stream where model never emits </think> reclassifies as content
+        do {
+            var router = StreamedMoEEventRouter(
+                thinkingConfig: config,
+                thinkingEnabled: true,
+                thoughtOpenID: thinkStartID,
+                thoughtCloseID: thinkEndID,
+                preopened: true)
+            var content = ""
+            var reclassified = false
+            func collect(_ event: EngineEvent) {
+                switch event {
+                case .thinkingDelta: break
+                case .delta(let d): content += d
+                case .thinkingReclassified: reclassified = true
+                case .prefill: break
+                case .completed: break
+                }
+            }
+            router.consume(tokenID: 10, delta: "Direct reply with no closing think tag.", emit: collect)
+            router.finish(emit: collect)
+
+            #expect(content == "Direct reply with no closing think tag.")
+            #expect(reclassified)
+        }
+    }
+
+    @MainActor
+    @Test func showThinkingToastSetsToastAndStyle() {
+        let controller = ChatController()
+        controller.showThinkingToast("Thinking is always on for SSD · Flint 40B A2.5B", enabled: true)
+        #expect(controller.effectiveSwitchToast == "Thinking is always on for SSD · Flint 40B A2.5B")
+        #expect(controller.switchToastStyle == .thinking(enabled: true))
+
+        controller.showThinkingToast("Thinking off", enabled: false)
+        #expect(controller.effectiveSwitchToast == "Thinking off")
+        #expect(controller.switchToastStyle == .thinking(enabled: false))
     }
 }

@@ -101,7 +101,7 @@ final class EngineRuntime {
         // MLX-only preflight: the streamed MoE backend validates its `.gturbo`
         // manifest instead. Dense and imported MLX behavior stays unchanged.
         if catalogModel.backend == .mlx,
-           let reason = ModelSupport.unsupportedReason(modelID: id) {
+           let reason = modelStore.unsupportedReason(for: id) {
             state = .empty
             throw EngineError.unavailable("\(catalogModel.displayName) can't run in this build: \(reason).")
         }

@@ -361,4 +361,36 @@ import TurboFieldfare
                 .supportsVision == false)
         #expect(ornith.supportsVision == false)
     }
+
+    @Test func flintCatalogEntryOffersOnlySSDStreamedMode() {
+        let source = ModelCatalog.model(for: StreamedMoEInstall.flint.sourceRepoID)
+        let streamed = ModelCatalog.model(for: StreamedMoEInstall.flint.modelID)
+
+        #expect(source?.backend == .mlx)
+        #expect(source?.installRestriction != nil)
+        #expect(source.map { ModelCatalog.familyID(for: $0) } == "flint")
+        #expect(ModelDownloadMode.availableModes(for: StreamedMoEInstall.flint.sourceRepoID) == [.ssdStreamed])
+        #expect(streamed?.backend == .streamedMoE)
+        #expect(streamed?.supportsVision == false)
+        #expect(streamed?.supportsThinking == true)
+        #expect(streamed?.supportsThinkingToggle == false)
+        #expect(streamed?.thinking?.startsInside == false)
+        #expect(streamed.map { ModelCatalog.familyID(for: $0) } == "flint")
+    }
+
+    @Test func expertCacheBytesPerSlotMatchesInstalledManifests() throws {
+        // Checked only where the install exists; the constants stay pinned.
+        for variant in StreamedMoEInstall.variants {
+            let url = variant.managedDirectory.appendingPathComponent("manifest.json")
+            guard let data = try? Data(contentsOf: url),
+                  let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let stride = manifest["expertStride"] as? Int,
+                  let files = manifest["files"] as? [String: Any] else { continue }
+            let layers = files.keys.filter { $0.hasPrefix("packed_experts/layer_") }.count
+            #expect(variant.architecture.expertCacheBytesPerSlot == UInt64(stride * layers),
+                    "\(variant.displayName)")
+        }
+        #expect(StreamedMoEArchitecture.lfm2moe.expertCacheBytesPerSlot
+                > 2 * StreamedMoEArchitecture.flint.expertCacheBytesPerSlot)
+    }
 }

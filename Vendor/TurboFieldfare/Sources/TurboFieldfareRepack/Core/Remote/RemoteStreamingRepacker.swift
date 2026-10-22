@@ -574,6 +574,10 @@ public final class RemoteStreamingRepacker {
             // The LFM2 router is an unquantized float32 matrix; 32 marks it so.
             bits.router = 32
         }
+        if plan.arch.family == .flint {
+            // Flint's router is an unquantized BF16 matrix; 16 marks it so.
+            bits.router = 16
+        }
         for e in plan.resident.entries {
             if e.name == "language_model.model.embed_tokens.weight"
                 || e.name == "model.embed_tokens.weight",

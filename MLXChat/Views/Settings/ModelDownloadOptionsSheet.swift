@@ -7,9 +7,10 @@ enum ModelDownloadMode: String, Hashable {
     static let defaultMode: ModelDownloadMode = .mlx
 
     static func availableModes(for modelID: String) -> [ModelDownloadMode] {
-        StreamedMoEInstall.supportsSSDStreaming(sourceModelID: modelID)
-            ? [.mlx, .ssdStreamed]
-            : [.mlx]
+        let streams = StreamedMoEInstall.supportsSSDStreaming(sourceModelID: modelID)
+        let mlxBlocked = ModelCatalog.model(for: modelID)?.installRestriction != nil
+        if streams && mlxBlocked { return [.ssdStreamed] }
+        return streams ? [.mlx, .ssdStreamed] : [.mlx]
     }
 }
 
@@ -29,7 +30,11 @@ struct ModelDownloadOptionsSheet: View {
 
     init(model: CatalogModel, initialMode: ModelDownloadMode = .defaultMode) {
         self.model = model
-        _selectedMode = State(initialValue: initialMode)
+        let allowed = ModelDownloadMode.availableModes(for: model.id)
+        let resolvedMode = allowed.contains(initialMode)
+            ? initialMode
+            : (allowed.first ?? .defaultMode)
+        _selectedMode = State(initialValue: resolvedMode)
     }
 
     private var store: ModelStore { chat.modelStore }
@@ -186,6 +191,12 @@ struct ModelDownloadOptionsSheet: View {
                 .labelsHidden()
                 .disabled(chat.isStreaming)
                 .accessibilityIdentifier("ssdExpertCachePicker")
+                if let streamedVariant {
+                    Text("\(streamedExpertCacheSlots) slots use about \(Self.storage(UInt64(streamedExpertCacheSlots) * streamedVariant.architecture.expertCacheBytesPerSlot)) of RAM for \(streamedVariant.displayName) once filled.")
+                        .font(Studio.sans(10))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("ssdExpertCacheMemory")
+                }
             }
 
             Text("The two controls are independent. Changes reload only the SSD-streamed engine; standard MLX models are unchanged.")
@@ -208,9 +219,7 @@ struct ModelDownloadOptionsSheet: View {
                     ? Color.iconBlue : Color.brandGreen))
             Text(model.displayName)
                 .font(Studio.sans(21, weight: .bold))
-            Text(supportsSSDStreaming
-                ? "Choose how this MoE model runs. MLX is the default; SSD streaming is an optional low-memory layout."
-                : "This model uses the standard MLX download and runtime.")
+            Text(heroSubtitle)
                 .font(Studio.body13)
                 .foregroundStyle(Color.subtitleGray)
                 .multilineTextAlignment(.center)
@@ -219,18 +228,30 @@ struct ModelDownloadOptionsSheet: View {
         .padding(.bottom, 2)
     }
 
+    private var heroSubtitle: String {
+        guard supportsSSDStreaming else {
+            return "This model uses the standard MLX download and runtime."
+        }
+        if model.installRestriction != nil {
+            return "This MoE model runs from SSD. The shared core and KV cache stay in memory while routed experts stream from disk."
+        }
+        return "Choose how this MoE model runs. MLX is the default; SSD streaming is an optional low-memory layout."
+    }
+
     private var modeChoices: some View {
         VStack(spacing: 10) {
-            DownloadModeCard(
-                icon: "shippingbox.fill",
-                tint: .brandGreen,
-                title: "Standard MLX",
-                subtitle: "Loads the normal model files through MLX. Best default when memory is available.",
-                badges: ["Default", "MLX", model.quantLabel],
-                selected: selectedMode == .mlx,
-                accessibilityIdentifier: "downloadMode.mlx") {
-                    selectedMode = .mlx
-                }
+            if model.installRestriction == nil {
+                DownloadModeCard(
+                    icon: "shippingbox.fill",
+                    tint: .brandGreen,
+                    title: "Standard MLX",
+                    subtitle: "Loads the normal model files through MLX. Best default when memory is available.",
+                    badges: ["Default", "MLX", model.quantLabel],
+                    selected: selectedMode == .mlx,
+                    accessibilityIdentifier: "downloadMode.mlx") {
+                        selectedMode = .mlx
+                    }
+            }
 
             if supportsSSDStreaming {
                 DownloadModeCard(

@@ -53,7 +53,7 @@ struct MessageView: View {
                     }
 
                     if !message.content.isEmpty {
-                        Markdown(MarkdownContent(MathPreprocessor.preprocess(message.content)))
+                        Markdown(MarkdownContentCache.shared.content(for: message.content))
                             .markdownTheme(.chatUser)
                             .markdownInlineImageProvider(
                                 MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
@@ -82,7 +82,7 @@ struct MessageView: View {
             thinkingSection
 
             if message.content.isEmpty, isStreamingThis, !isInThinkPhase {
-                WaitingDots()
+                PromptReadingIndicator()
             } else {
                 contentBlocks
             }
@@ -103,7 +103,7 @@ struct MessageView: View {
             }
         } else if let thinking = message.thinking, !thinking.isEmpty {
             DisclosureGroup {
-                Markdown(thinking)
+                Markdown(MarkdownContentCache.shared.content(for: thinking, math: false))
                     .markdownTheme(.chat)
                     .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
@@ -138,15 +138,15 @@ struct MessageView: View {
         }
     }
 
-    /// Preprocess every streaming flush. WelcomeView's anti-ghost pair is
-    /// applied only to this markdown subview so LazyVStack insert animation
-    /// on `messages.count` is left intact.
+    /// Preprocess every streaming flush; finished text comes from the cache.
+    /// WelcomeView's anti-ghost pair is applied only to this markdown subview
+    /// so LazyVStack insert animation on `messages.count` is left intact.
     @ViewBuilder
     private func streamingAssistantMarkdown(_ text: String) -> some View {
-        let renderedText = isStreamingThis
-            ? Self.preprocessStreamingFlush(text)
-            : MathPreprocessor.preprocess(text)
-        let markdown = Markdown(MarkdownContent(renderedText))
+        let content = isStreamingThis
+            ? MarkdownContent(Self.preprocessStreamingFlush(text))
+            : MarkdownContentCache.shared.content(for: text)
+        let markdown = Markdown(content)
             .markdownTheme(.chat)
             .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
             .markdownInlineImageProvider(MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
@@ -222,6 +222,21 @@ struct MessageView: View {
     }
 }
 
+/// A parent pass with the same inputs skips the body and its Markdown; the
+/// row still renders again on its own when the message it reads changes.
+/// `onRegenerate` counts only by presence: for one row it always regenerates
+/// the same message in the same chat.
+extension MessageView: Equatable {
+    nonisolated static func == (lhs: MessageView, rhs: MessageView) -> Bool {
+        lhs.message === rhs.message
+            && lhs.isStreamingThis == rhs.isStreamingThis
+            && lhs.isInThinkPhase == rhs.isInThinkPhase
+            && lhs.isAnyStreaming == rhs.isAnyStreaming
+            && lhs.modelDisplayName == rhs.modelDisplayName
+            && (lhs.onRegenerate == nil) == (rhs.onRegenerate == nil)
+    }
+}
+
 /// NSPasteboard copy with a 1.5s checkmark flip — shared by the assistant
 /// footer and the user bubble (which uses the smaller `size`).
 private struct CopyButton: View {
@@ -250,6 +265,25 @@ private struct CopyButton: View {
 }
 
 /// Three pulsing dots while waiting for the first token.
+/// Waiting dots, plus how much of the prompt is read when the engine reports
+/// it. Reads the controller itself, so progress redraws only this view.
+private struct PromptReadingIndicator: View {
+    @Environment(ChatController.self) private var chat
+
+    var body: some View {
+        HStack(spacing: 8) {
+            WaitingDots()
+            if let progress = chat.prefillProgress, progress < 1 {
+                Text("Reading prompt \(Int(progress * 100))%")
+                    .font(Studio.sans(12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("promptReadingProgress")
+            }
+        }
+    }
+}
+
 struct WaitingDots: View {
     @State private var phase = 0
 

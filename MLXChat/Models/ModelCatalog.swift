@@ -194,6 +194,10 @@ enum ModelCatalog {
     /// Display order of the family cards in Manage Models.
     static let families: [ModelFamily] = [
         ModelFamily(
+            id: "flint", name: "Flint", icon: "chevron.left.forwardslash.chevron.right",
+            blurb: "Recursive's 40B coding model with about 2.5B active parameters. Experts stream from SSD; the in-memory MLX loader does not include this architecture.",
+            badges: [.new, .coding, .thinking]),
+        ModelFamily(
             id: "lfm25", name: "LFM2.5", icon: "brain.head.profile",
             blurb: "Liquid AI's reasoning models with a 128K context window: the compact 2.6B and the 24B-A2B mixture of experts, which can also stream its experts from SSD.",
             badges: [.new, .thinking, .recommended]),
@@ -259,6 +263,7 @@ enum ModelCatalog {
     static func familyID(for model: CatalogModel) -> String {
         if model.category == .imported { return "imported" }
         let name = model.displayName
+        if name.hasPrefix("Flint") { return "flint" }
         if name.hasPrefix("LFM2.5") { return "lfm25" }
         if name.hasPrefix("Qwen3.6") { return "qwen36" }
         if name.hasPrefix("Qwen3.5") { return "qwen35" }
@@ -355,6 +360,20 @@ enum ModelCatalog {
             blurb: "LFM2.5 MoE with a configurable context cache and SSD-streamed experts.",
             extraEOSTokens: ["<|im_end|>"],
             thinking: .thinkTags(startsInside: true, toggleable: false),
+            backend: .streamedMoE),
+        CatalogModel(
+            id: StreamedMoEInstall.flint.sourceRepoID, displayName: "Flint 40B A2.5B",
+            sizeGB: 22.57, ctxTokens: 262_144, quantLabel: "4-bit · Recursive", category: .coding,
+            blurb: "Coding mixture-of-experts. The in-memory loader cannot run it; use the SSD-streamed install.",
+            extraEOSTokens: ["<|end_of_text|>"],
+            thinking: .thinkTags(startsInside: false, toggleable: false),
+            installRestriction: "Flint runs only as an SSD-streamed model in this build."),
+        CatalogModel(
+            id: StreamedMoEInstall.flint.modelID, displayName: "Flint 40B A2.5B",
+            sizeGB: 22.58, ctxTokens: 262_144, quantLabel: "4-bit · SSD", category: .coding,
+            blurb: "Flint with a configurable context cache and SSD-streamed experts.",
+            extraEOSTokens: ["<|end_of_text|>"],
+            thinking: .thinkTags(startsInside: false, toggleable: false),
             backend: .streamedMoE),
         CatalogModel(
             id: StreamedMoEInstall.qwen36.sourceRepoID, displayName: "Qwen3.6 35B A3B",

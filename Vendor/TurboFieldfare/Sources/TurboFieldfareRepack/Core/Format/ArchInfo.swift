@@ -7,6 +7,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case lfm2moe = "lfm2moe"
+    case flint = "flint"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -62,6 +63,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "lfm2_moe" {
             return try loadLFM2MoE(configPath: configPath, tc: root)
+        }
+        if (root["model_type"] as? String) == "flint" {
+            return try loadFlint(configPath: configPath, tc: root)
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
@@ -403,6 +407,107 @@ struct ArchInfo: Sendable, Equatable {
                 path: configPath,
                 detail: "qwen3_5_moe config does not match the pinned "
                     + "Qwen3.6-35B-A3B architecture baseline")
+        }
+    }
+
+    // MARK: - Flint (`model_type == "flint"`, flat config)
+
+    /// 49 layers: 14 full-attention layers with no rotary encoding, and 35
+    /// sliding-window layers (window 513, including the current token) with
+    /// NeoX rotary encoding. The first two layers are dense SwiGLU; the rest
+    /// add a shared expert to the top-6 of 256 routed experts.
+    private static func loadFlint(configPath: String,
+                                  tc: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        guard let layerTypes = tc["layer_types"] as? [String] else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "missing layer_types")
+        }
+        let mask: [UInt8] = try layerTypes.map { kind in
+            switch kind {
+            case "full_attention": return 1
+            case "sliding_attention": return 0
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "unknown layer_types entry \"\(kind)\"")
+            }
+        }
+        let headDim = try i("head_dim")
+        let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
+        let theta = (rope["rope_theta"] as? Double)
+            ?? (rope["rope_theta"] as? NSNumber)?.doubleValue
+            ?? (tc["rope_theta"] as? Double)
+            ?? (tc["rope_theta"] as? NSNumber)?.doubleValue
+            ?? 10_000
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("intermediate_size"),
+            moeIntermediateSize: try i("moe_intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: try i("sliding_window"),
+            finalLogitSoftcap: 0,
+            ropeTheta: theta,
+            fullRopeTheta: theta,
+            partialRotaryFactor: 1,
+            numLayers: try i("num_hidden_layers"),
+            numExperts: try i("num_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: (tc["tie_word_embeddings"] as? Bool) ?? false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: (tc["hidden_act"] as? String) ?? "silu",
+            family: .flint,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0)
+        try crossCheckProductionFlint(arch, configPath: configPath, tc: tc)
+        return arch
+    }
+
+    private static func crossCheckProductionFlint(_ a: ArchInfo,
+                                                 configPath: String,
+                                                 tc: [String: Any]) throws {
+        let fullLayers = [0, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 48]
+        var expectedMask = [UInt8](repeating: 0, count: 49)
+        for index in fullLayers { expectedMask[index] = 1 }
+        let noRope = (tc["no_rope_layer_indices"] as? [Int]) ?? []
+        let dense = (tc["mlp_only_layers"] as? [Int]) ?? []
+        let export = tc["mlx_export"] as? [String: Any]
+        let embedBits = (export?["embedding_bits"] as? Int)
+            ?? (export?["embedding_bits"] as? NSNumber)?.intValue
+        let routedBits = (export?["routed_expert_bits"] as? Int)
+            ?? (export?["routed_expert_bits"] as? NSNumber)?.intValue
+        guard a.hiddenSize == 2048, a.intermediateSize == 6144,
+              a.moeIntermediateSize == 512, a.numHeads == 32, a.numKVHeads == 4,
+              a.headDim == 128, a.vocabSize == 150_144, a.slidingWindow == 513,
+              a.numLayers == 49, a.numExperts == 256, a.topKExperts == 6,
+              a.tieWordEmbeddings == false, a.hiddenActivation == "silu",
+              a.fullAttentionLayerMask == expectedMask,
+              noRope == fullLayers, dense == [0, 1],
+              embedBits == 8, routedBits == 4,
+              (tc["shared_expert_intermediate_size"] as? Int) == 1024
+        else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "flint config does not match the pinned Flint 40B-A2.5B baseline")
         }
     }
 }

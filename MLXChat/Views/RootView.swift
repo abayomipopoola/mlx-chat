@@ -7,7 +7,6 @@ struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var selectedConversationID: UUID?
     @State private var navigation = WindowNavigation()
-    @State private var showSplash = true
     /// Shared open/anchor state for the root-hosted header dropdowns.
     @State private var dropdown = HeaderDropdown()
     @AppStorage(Keys.appearance) private var appearance = Keys.Defaults.appearance
@@ -26,13 +25,7 @@ struct RootView: View {
     }
 
     var body: some View {
-        ZStack {
-            mainLayout
-            if showSplash {
-                SplashView()
-                    .transition(.opacity)
-            }
-        }
+        mainLayout
         .font(Studio.sans(13))
         .onAppear {
             AppAppearance.apply(appearance)
@@ -111,11 +104,11 @@ struct RootView: View {
             }
         }
         .task {
+            // A unit-test host must not hold a second copy of a model the
+            // tests load themselves.
+            guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+            else { return }
             chat.preloadSelectedModelIfAvailable()
-        }
-        .task {
-            try? await Task.sleep(for: .seconds(1.0))
-            withAnimation(.easeOut(duration: 0.4)) { showSplash = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: .settingsRoute)) { _ in
             navigation.push(.settings)
@@ -140,11 +133,22 @@ struct RootView: View {
             dropdown.open = nil
             if !navigation.path.isEmpty {
                 DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
+            } else {
+                // Back on the chat: the push cleared focus, so hand it back.
+                NotificationCenter.default.post(name: .focusComposer, object: nil)
             }
         }
         .onChange(of: sidebarCollapsed) { dropdown.open = nil }
         .onReceive(NotificationCenter.default.publisher(for: .dismissHeaderDropdown)) { _ in
-            dropdown.open = nil
+            // Esc closes an open dropdown first; otherwise it stops a reply,
+            // unless a sheet over the window takes Esc for itself.
+            if dropdown.open != nil {
+                dropdown.open = nil
+            } else if chat.isStreaming, NSApp.keyWindow?.attachedSheet == nil,
+                      NSApp.keyWindow?.isSheet != true {
+                chat.stop()
+                NotificationCenter.default.post(name: .focusComposer, object: nil)
+            }
         }
     }
 

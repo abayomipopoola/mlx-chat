@@ -39,6 +39,41 @@ import TurboFieldfare
             thinkingEnabled: true) == .reset)
     }
 
+    @Test func rewindableRunnerResumesAcrossConversationsAtTheSharedPrefix() {
+        // A new chat shares the system prompt tokens [1, 2, 3] with the last
+        // one; the conversation, prompt text and thinking keys do not gate it.
+        let newChat: [Int32] = [1, 2, 3, 8, 9]
+        let start = StreamedMoEKVReusePolicy.start(
+            newPromptIDs: newChat,
+            cache: makeCache(conversationID: conversationA, systemPrompt: "Be concise.",
+                             thinkingEnabled: true, kvTokenIDs: cachedIDs),
+            conversationID: conversationB,
+            systemPrompt: "Be thorough.",
+            thinkingEnabled: false,
+            allowsRewind: true)
+        #expect(start == .resume(cachedPromptTokens: 3))
+    }
+
+    @Test func rewindableRunnerRefeedsOnlyTheLastTokenOfAFullyCachedPrompt() {
+        // Regenerate sends the same prompt; at least one token must be fed
+        // again for fresh logits, so resume one short of the end.
+        let start = StreamedMoEKVReusePolicy.start(
+            newPromptIDs: [1, 2, 3],
+            cache: makeCache(kvTokenIDs: cachedIDs),
+            conversationID: conversationB,
+            systemPrompt: "Be concise.",
+            thinkingEnabled: true,
+            allowsRewind: true)
+        #expect(start == .resume(cachedPromptTokens: 2))
+        #expect(StreamedMoEKVReusePolicy.start(
+            newPromptIDs: [1],
+            cache: makeCache(kvTokenIDs: cachedIDs),
+            conversationID: conversationB,
+            systemPrompt: "Be concise.",
+            thinkingEnabled: true,
+            allowsRewind: true) == .reset)
+    }
+
     @Test func rewindableRunnerResetsWhenNothingIsShared() {
         let start = StreamedMoEKVReusePolicy.start(
             newPromptIDs: [7, 8, 9],

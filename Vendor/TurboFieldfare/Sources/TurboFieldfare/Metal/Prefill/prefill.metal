@@ -18,6 +18,18 @@ constant constexpr float kPrefillGeluCubicCoeff = 0.044715f;
 constant uint FC_PREFILL_KV_RING_CAP [[function_constant(76)]];
 // Unset/false = gelu_pytorch_tanh (Gemma), true = silu (Qwen 3.6 SwiGLU).
 constant bool FC_PREFILL_ACT_SILU [[function_constant(77)]];
+// Set (Flint): grouped routed-expert activations and down outputs saturate to
+// +/-65504 instead of overflowing FP16 to inf, as Flint's decode clamp does.
+// Unset leaves the kernels exactly as before.
+constant bool FC_PREFILL_SATURATE_FP16 [[function_constant(78)]];
+
+static inline float prefill_saturate(float x) {
+    if (is_function_constant_defined(FC_PREFILL_SATURATE_FP16) &&
+        FC_PREFILL_SATURATE_FP16) {
+        return clamp(x, -65504.0f, 65504.0f);
+    }
+    return x;
+}
 
 static inline float prefill_gelu_pytorch_tanh(float x) {
     const float x3 = x * x * x;
@@ -643,7 +655,7 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     gate_up_act_scratch[index] = half(gate);
     gate_up_act_scratch[row_elements + index] = half(up);
     gate_up_act_scratch[2u * row_elements + index] =
-        half(prefill_hidden_activation(gate) * up);
+        half(prefill_saturate(prefill_hidden_activation(gate) * up));
 }
 
 kernel void prefill_grouped_routed_moe_batched_down(
@@ -674,7 +686,8 @@ kernel void prefill_grouped_routed_moe_batched_down(
     device const bfloat* down_s = reinterpret_cast<device const bfloat*>(expert + p.down_s_off);
     device const bfloat* down_b = reinterpret_cast<device const bfloat*>(expert + p.down_b_off);
     device const half* act = gate_up_act_scratch + 2u * p.pair_count * p.F + pair_local * p.F;
-    const half value = half(prefill_moe_int4_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
+    const half value = half(prefill_saturate(
+        prefill_moe_int4_gemv_row_dev(down_W, down_s, down_b, act, d, p.F)));
     down_scratch[pair_local * p.D + d] = value;
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }

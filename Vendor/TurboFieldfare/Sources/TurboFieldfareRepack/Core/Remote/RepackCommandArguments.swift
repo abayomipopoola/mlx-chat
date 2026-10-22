@@ -19,8 +19,8 @@ public struct RepackCommandArguments: Equatable, Sendable {
 
     public static let usage = """
     Usage:
-      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>] --output <model.gturbo> [--overwrite] [--resume]
-      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25>] --dry-run --output <model.gturbo>
+      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25|flint>] --output <model.gturbo> [--overwrite] [--resume]
+      TurboFieldfareRepack [--model <gemma4|gemma4-qat|qwen36|ornith15|lfm25|flint>] --dry-run --output <model.gturbo>
       TurboFieldfareRepack --write-vision --model <gemma4|gemma4-qat> --text-model <text.gturbo> --output <name.vision.gturbo> [--overwrite] [--resume]
       TurboFieldfareRepack --discard-partial --output <model.gturbo>
       TurboFieldfareRepack --verify-install --input-gturbo <model.gturbo>

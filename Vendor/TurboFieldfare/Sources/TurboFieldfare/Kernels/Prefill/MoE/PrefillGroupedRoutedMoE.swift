@@ -358,14 +358,21 @@ final class PrefillGroupedRoutedMoE {
         return PrefillStreamedTileArgumentBuffer(buffer: buffer)
     }
 
-    init(context: MetalContext, siluActivation: Bool = false) throws {
-        let activationConstants: [MetalFunctionConstant] = siluActivation
-            ? [MetalFunctionConstant(index: 77, value: .bool(true))]
+    /// `saturateFP16` clamps activations and down outputs to the FP16 range
+    /// (function constant 78); Gemma and Qwen leave it off.
+    init(context: MetalContext, siluActivation: Bool = false, saturateFP16: Bool = false) throws {
+        let saturation: [MetalFunctionConstant] = saturateFP16
+            ? [MetalFunctionConstant(index: 78, value: .bool(true))]
             : []
+        let activationConstants: [MetalFunctionConstant] = (siluActivation
+            ? [MetalFunctionConstant(index: 77, value: .bool(true))]
+            : []) + saturation
         self.batchedPhase1PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1",
             constants: activationConstants)
-        self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
+        self.batchedDownPSO = saturation.isEmpty
+            ? try context.pipeline("prefill_grouped_routed_moe_batched_down")
+            : try context.pipeline("prefill_grouped_routed_moe_batched_down", constants: saturation)
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }

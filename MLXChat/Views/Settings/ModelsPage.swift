@@ -41,9 +41,18 @@ struct ModelsPage: View {
     }
 
     private func members(of familyID: String) -> [CatalogModel] {
-        chat.modelStore.allModels.filter {
-            $0.backend == .mlx && ModelCatalog.familyID(for: $0) == familyID
-        }
+        let allModels = chat.modelStore.allModels
+        return allModels
+            .filter { $0.backend == .mlx && ModelCatalog.familyID(for: $0) == familyID }
+            .map { model in
+                guard model.installRestriction != nil,
+                      let variant = StreamedMoEInstall.variant(forSourceModelID: model.id),
+                      let streamed = allModels.first(where: { $0.id == variant.modelID }),
+                      isVisibleInModelManager(streamed) else {
+                    return model
+                }
+                return streamed
+            }
     }
 
     private func isVisibleInModelManager(_ model: CatalogModel) -> Bool {
@@ -160,8 +169,14 @@ struct ModelsPage: View {
                 chat.modelStore.isAvailable($0.id)
             }
             let visibleFamilies = ModelCatalog.families.filter { family in
-                (membersByFamily[family.id] ?? []).contains {
-                    !chat.modelStore.isAvailable($0.id)
+                (membersByFamily[family.id] ?? []).contains { model in
+                    if chat.modelStore.isAvailable(model.id) { return false }
+                    if model.installRestriction != nil,
+                       let variant = StreamedMoEInstall.variant(forSourceModelID: model.id),
+                       chat.modelStore.isAvailable(variant.modelID) {
+                        return false
+                    }
+                    return true
                 }
             }
             let memberCounts = membersByFamily.mapValues(\.count)
@@ -175,9 +190,7 @@ struct ModelsPage: View {
                 onAdd: { presentedSheet = .importMLX },
                 onSetupStreamed: presentStreamedSetup,
                 onDownload: { model in
-                    presentedSheet = .download(
-                        model: model,
-                        initialMode: .mlx)
+                    downloadAction(for: model)?()
                 },
                 onDelete: { deleteCandidate = $0 },
                 onOpenFamily: onOpenFamily)
@@ -203,18 +216,27 @@ struct ModelsPage: View {
         ModelRow(
             model: model,
             onDelete: { deleteCandidate = model },
-            onDownload: model.backend == .mlx && model.installRestriction == nil
-                ? {
-                    presentedSheet = .download(
-                        model: model,
-                        initialMode: .mlx)
-                }
-                : nil,
+            onDownload: downloadAction(for: model),
             onSetupStreamed: model.backend == .streamedMoE
                 ? {
                     presentStreamedSetup(for: model)
                 }
                 : nil)
+    }
+
+    private func downloadAction(for model: CatalogModel) -> (() -> Void)? {
+        guard model.backend == .mlx else { return nil }
+        if model.installRestriction == nil {
+            return {
+                presentedSheet = .download(model: model, initialMode: .mlx)
+            }
+        }
+        guard StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id) else {
+            return nil
+        }
+        return {
+            presentedSheet = .download(model: model, initialMode: .ssdStreamed)
+        }
     }
 
     private func presentStreamedSetup(for streamedModel: CatalogModel) {

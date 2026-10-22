@@ -16,6 +16,9 @@ struct EngineMessage: Sendable {
 }
 
 enum EngineEvent: Sendable {
+    /// Prompt tokens read so far, before the first output (engines that
+    /// report it; at most about ten a second).
+    case prefill(done: Int, total: Int)
     case delta(String)
     case thinkingDelta(String)
     /// The whole response turned out to be an unclosed think block: the caller must

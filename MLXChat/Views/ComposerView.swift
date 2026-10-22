@@ -75,7 +75,7 @@ struct ComposerView: View {
                 ComposerDraftField(
                     draft: $draft,
                     focused: $focused,
-                    isEnabled: !isPreparing
+                    isLoadingModel: isPreparing
                 ) {
                     submit()
                 }
@@ -134,9 +134,6 @@ struct ComposerView: View {
         }
         .onChange(of: chat.selectedModelID) {
             clearPending()
-        }
-        .onChange(of: isPreparing) { _, preparing in
-            if preparing { focused = false }
         }
         .onDisappear {
             dropdown.attachPhoto = nil
@@ -296,10 +293,11 @@ struct AttachPanel: View {
 }
 
 /// Grows from one line to eight, then scrolls so a long paste stays reachable.
+/// Stays editable while a model loads; only sending waits for it.
 private struct ComposerDraftField: View {
     @Binding var draft: String
     @FocusState.Binding var focused: Bool
-    var isEnabled: Bool = true
+    var isLoadingModel: Bool = false
     let onSubmit: () -> Void
 
     private static let minHeight: CGFloat = 22
@@ -320,18 +318,16 @@ private struct ComposerDraftField: View {
                 .textEditorStyle(.plain)
                 .scrollIndicators(needsScroll ? .visible : .hidden)
                 .focused($focused)
-                .disabled(!isEnabled)
-                .opacity(isEnabled ? 1 : 0.55)
                 .writingToolsBehavior(.disabled)
                 .writingToolsAffordanceVisibility(.hidden)
                 .accessibilityIdentifier("composerField")
                 .accessibilityLabel("What can I help you with?")
                 .onKeyPress(.return, phases: .down) { press in
-                    if !isEnabled { return .handled }
                     if press.modifiers.contains(.shift) {
                         return .ignored
                     }
-                    onSubmit()
+                    // Return while loading keeps the draft; Send waits.
+                    if !isLoadingModel { onSubmit() }
                     return .handled
                 }
                 .background(alignment: .top) {
@@ -351,7 +347,9 @@ private struct ComposerDraftField: View {
                 }
 
             if draft.isEmpty {
-                Text(isEnabled ? "What can I help you with?" : "Loading model…")
+                Text(isLoadingModel
+                     ? "Loading model… you can start typing"
+                     : "What can I help you with?")
                     .font(Studio.composerText)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 5)

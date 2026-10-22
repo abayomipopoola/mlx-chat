@@ -38,6 +38,7 @@ struct EngineIntegrationTests {
             case .delta(let delta): content += delta
             case .thinkingDelta(let delta): thinking += delta
             case .thinkingReclassified: thinking = ""
+            case .prefill: break
             case .completed(let tps): tokensPerSecond = tps
             }
         }
@@ -167,6 +168,7 @@ struct EngineIntegrationTests {
             case .delta(let delta): content += delta
             case .thinkingDelta(let delta): thinking += delta
             case .thinkingReclassified: thinking = ""
+            case .prefill: break
             case .completed(let tps): tokensPerSecond = tps
             }
         }

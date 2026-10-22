@@ -71,6 +71,13 @@ enum IndexLoader {
             if let b = quant["bits"] as? Int      { baseBits  = b }
             if let g = quant["group_size"] as? Int { baseGroup = g }
             if let m = quant["mode"] as? String   { baseMode  = m }
+            if let export = root["mlx_export"] as? [String: Any],
+               let embedBits = (export["embedding_bits"] as? Int)
+                ?? (export["embedding_bits"] as? NSNumber)?.intValue,
+               embedBits != baseBits {
+                overrides["model.embed_tokens"] = QuantSpec(bits: embedBits)
+                overrides["language_model.model.embed_tokens"] = QuantSpec(bits: embedBits)
+            }
             for (k, v) in quant where !(k == "bits" || k == "group_size" || k == "mode") {
                 guard let entry = v as? [String: Any] else { continue }
                 let bits = (entry["bits"] as? Int) ?? baseBits
@@ -102,6 +109,17 @@ enum IndexLoader {
                               baseMode: baseMode,
                               bitsOverrides: overrides,
                               shardFilenames: shards)
+    }
+
+    /// Stable `model.safetensors.index.json` bytes for a checkpoint that does
+    /// not ship one. Keys are sorted and there is no whitespace, so the
+    /// SHA-256 is reproducible.
+    static func canonicalIndexJSON(weightMap: [String: String], totalSize: UInt64) -> Data {
+        let pairs = weightMap.keys.sorted().map { key in
+            "\"\(key)\":\"\(weightMap[key] ?? "")\""
+        }.joined(separator: ",")
+        let text = "{\"metadata\":{\"total_size\":\(totalSize)},\"weight_map\":{\(pairs)}}"
+        return Data(text.utf8)
     }
 
     /// Resolves the bits/group for one tensor name (with or without `.weight`).

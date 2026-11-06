@@ -75,6 +75,8 @@ import MLXVLM
     /// mlx-swift-lm version actually linked (LLM ∪ VLM; update after upgrades).
     @Test func staticListMatchesLLMAndVLMRegistries() async {
         await PrismHadamardQwen35.register()
+        await LFM3.register()
+        await Spark25.register()
         for type in ModelSupport.supportedModelTypes {
             let inLLM = await LLMTypeRegistry.shared.contains(type)
             let inVLM = await VLMTypeRegistry.shared.contains(type)

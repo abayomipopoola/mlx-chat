@@ -586,7 +586,10 @@ enum ModelCatalog {
 
     static func thinkingConfig(forModelType type: String) -> ThinkingConfig? {
         switch type {
-        case "qwen3_5", "qwen3_5_moe", "qwen3_5_text", PrismHadamardQwen35.modelType:
+        // LFM3 text models and Spark open <think> in the template; LFM3-Omni is
+        // non-reasoning.
+        case "qwen3_5", "qwen3_5_moe", "qwen3_5_text", PrismHadamardQwen35.modelType, "lfm3",
+             Spark25.modelType:
             return .thinkTags(startsInside: true, toggleable: true)
         case "qwen3", "qwen3_moe":
             return .thinkTags(toggleable: true)

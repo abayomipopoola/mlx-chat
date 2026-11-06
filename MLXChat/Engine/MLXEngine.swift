@@ -75,6 +75,8 @@ final class MLXEngine: ChatEngine {
         } else {
             prismPolicy = nil
         }
+        await LFM3.register()
+        await Spark25.register()
 
         do {
             // Route mlx C-level errors (e.g. affine quantize rejection) into

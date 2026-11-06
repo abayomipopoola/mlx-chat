@@ -33,6 +33,11 @@ enum ModelSupport {
         "qwen3_5_text",
         // Registered by the app (PrismHadamardQwen35), not by mlx-swift-lm.
         "prism_hadamard_qwen35",
+        // Registered by the app (LFM3); lfm3_omni loads its text backbone only.
+        "lfm3",
+        "lfm3_omni",
+        // Registered by the app (Spark25): XHToken's Spark-X2.5 and X2.6.
+        "spark2_5",
         "minicpm",
         "starcoder2",
         "cohere",
@@ -101,6 +106,11 @@ enum ModelSupport {
         "glm_ocr",
     ]
 
+    /// Types the app runs as text-only models even with a `vision_config`: LFM3
+    /// ships an empty one, and LFM3-Omni's vision encoder isn't in this build.
+    /// Neither may load through the VLM factory.
+    private static let textOnlyModelTypes: Set<String> = ["lfm3", "lfm3_omni"]
+
     private static let supportedBits: Set<Int> = [2, 3, 4, 5, 6, 8]
     private static let supportedGroupSizes: Set<Int> = [32, 64, 128]
 
@@ -123,6 +133,14 @@ enum ModelSupport {
 
         if !supportedModelTypes.contains(modelType) {
             return "Architecture “\(modelType)” isn't supported."
+        }
+
+        // A PyTorch quantized build (FP8, GPTQ, AWQ…) names its method in
+        // `quantization_config` and has no MLX `quantization` block. MLX can't read
+        // its weights, whatever the architecture. MLX conversions often carry both.
+        if dict["quantization"] == nil,
+           let method = (dict["quantization_config"] as? [String: Any])?["quant_method"] as? String {
+            return "This is a PyTorch \(method) build, not an MLX one. Look for an MLX version of this model."
         }
 
         if let reason = quantizationReason(dict["quantization"] as? [String: Any]) {
@@ -156,18 +174,21 @@ enum ModelSupport {
     /// True when the model is a vision-language model: `config.json` has a
     /// `vision_config` dictionary, or `model_type` is in the VLM-only set.
     /// Shared types (qwen3_5, gemma3/4, mistral3) are vision only when
-    /// `vision_config` is present.
+    /// `vision_config` is present. Types in `textOnlyModelTypes` never are.
     static func visionCapable(configJSON data: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any]
         else {
             return false
         }
+        let modelType = dict["model_type"] as? String
+        if let modelType, textOnlyModelTypes.contains(modelType) {
+            return false
+        }
         if dict["vision_config"] is [String: Any] {
             return true
         }
-        if let modelType = dict["model_type"] as? String,
-           visionOnlyModelTypes.contains(modelType) {
+        if let modelType, visionOnlyModelTypes.contains(modelType) {
             return true
         }
         return false

@@ -7,14 +7,16 @@ import TurboFieldfare
 /// models keep their existing loading and cached-session behavior. The actor
 /// below owns TurboFieldfare's resident core, FP16 KV cache, Metal state, and
 /// SSD-backed expert streamers.
-final class StreamedMoEEngine: ChatEngine {
+final class StreamedMoEEngine: ChatEngine, @unchecked Sendable {
     let model: CatalogModel
     let modelDirectory: URL
     var id: String { model.id }
 
     private let runtimeSettings: StreamedMoERuntimeSettings
+    private let stateLock = NSLock()
     private var session: StreamedMoESession?
     private var inFlightLoad: Task<Void, Error>?
+    private var loadGeneration: UInt64 = 0
 
     init(
         model: CatalogModel,
@@ -27,21 +29,75 @@ final class StreamedMoEEngine: ChatEngine {
         self.runtimeSettings = runtimeSettings
     }
 
-    var isLoaded: Bool { session != nil }
+    var isLoaded: Bool { stateLock.withLock { session != nil } }
 
-    func load(progress: @escaping @Sendable (Double) -> Void) async throws {
-        guard session == nil else { return }
-        if let inFlightLoad {
-            try await inFlightLoad.value
-            return
-        }
-        let task = Task { try await self.performLoad(progress: progress) }
-        inFlightLoad = task
-        defer { inFlightLoad = nil }
-        try await task.value
+    /// Multimodal turns use `MultimodalPromptRenderer` which renders without
+    /// thinking enabled, so the event router must not open a think channel.
+    nonisolated static func routerThinkingEnabled(
+        architecture: StreamedMoEArchitecture,
+        thinkingEnabled: Bool,
+        wantsImages: Bool
+    ) -> Bool {
+        guard !wantsImages else { return false }
+        return architecture == .flint ? true : thinkingEnabled
     }
 
-    private func performLoad(progress: @escaping @Sendable (Double) -> Void) async throws {
+    func load(progress: @escaping @Sendable (Double) -> Void) async throws {
+        enum Action {
+            case alreadyLoaded
+            case join(Task<Void, Error>)
+            case start(Task<Void, Error>, UInt64)
+        }
+        let action: Action = stateLock.withLock {
+            if session != nil { return .alreadyLoaded }
+            if let existing = inFlightLoad { return .join(existing) }
+            let generation = loadGeneration
+            let task = Task { try await self.performLoad(generation: generation, progress: progress) }
+            inFlightLoad = task
+            return .start(task, generation)
+        }
+        switch action {
+        case .alreadyLoaded:
+            return
+        case .join(let existing):
+            try await existing.value
+        case .start(let task, let generation):
+            defer {
+                stateLock.withLock {
+                    if loadGeneration == generation {
+                        inFlightLoad = nil
+                    }
+                }
+            }
+            try await task.value
+        }
+    }
+
+    static func mapLoadError(_ error: Error) -> Error {
+        if error is CancellationError {
+            return CancellationError()
+        }
+        if let engineError = error as? EngineError {
+            return engineError
+        }
+        return EngineError.generationFailed(
+            "Couldn’t load the SSD-streamed model: \(String(describing: error))")
+    }
+
+    static func withTemporaryImageFile<T>(_ data: Data, body: (URL) throws -> T) throws -> T {
+        try Task.checkCancellation()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mlx-chat-vision-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try data.write(to: url, options: .atomic)
+        try Task.checkCancellation()
+        return try body(url)
+    }
+
+    private func performLoad(
+        generation: UInt64,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws {
         guard let variant = StreamedMoEInstall.variant(
             forStreamedModelID: model.id) else {
             throw EngineError.unavailable("This SSD-streamed model is not supported.")
@@ -54,24 +110,35 @@ final class StreamedMoEEngine: ChatEngine {
                 settings: runtimeSettings,
                 progress: progress)
             try Task.checkCancellation()
-            session = candidate
+            let committed = stateLock.withLock { () -> Bool in
+                guard loadGeneration == generation else { return false }
+                session = candidate
+                return true
+            }
+            guard committed else {
+                await candidate.unload()
+                throw CancellationError()
+            }
             // The first chat then starts after the system prompt.
             await candidate.prewarm(systemPrompt: PromptBuilder.currentSystemPrompt())
-        } catch is CancellationError {
-            throw CancellationError()
         } catch {
-            throw EngineError.generationFailed(
-                "Couldn’t load the SSD-streamed model: \(String(describing: error))")
+            throw Self.mapLoadError(error)
         }
     }
 
     func unload() {
-        inFlightLoad?.cancel()
-        inFlightLoad = nil
-        if let session {
-            Task { await session.cancelPrewarm() }
+        let (loadToCancel, activeSession) = stateLock.withLock { () -> (Task<Void, Error>?, StreamedMoESession?) in
+            loadGeneration &+= 1
+            let loadTask = inFlightLoad
+            let currentSession = session
+            inFlightLoad = nil
+            session = nil
+            return (loadTask, currentSession)
         }
-        session = nil
+        loadToCancel?.cancel()
+        if let activeSession {
+            Task { await activeSession.unload() }
+        }
     }
 
     func stream(
@@ -81,7 +148,7 @@ final class StreamedMoEEngine: ChatEngine {
         conversationID: UUID
     ) -> AsyncThrowingStream<EngineEvent, Error> {
         AsyncThrowingStream { continuation in
-            guard let session else {
+            guard let session = stateLock.withLock({ self.session }) else {
                 continuation.finish(throwing: EngineError.generationFailed("Model is not loaded."))
                 return
             }
@@ -111,7 +178,7 @@ final class StreamedMoEEngine: ChatEngine {
 }
 
 /// Serial owner of TurboFieldfare's non-copyable Metal and streaming state.
-private actor StreamedMoESession {
+actor StreamedMoESession {
     private struct LoadedState {
         let directory: URL
         let architecture: StreamedMoEArchitecture
@@ -130,6 +197,58 @@ private actor StreamedMoESession {
     /// Feeds the system prompt after load. `generate` awaits it first: the
     /// actor is reentrant, and both drive the same runner.
     private var prewarmTask: Task<Void, Never>?
+    /// Serializes reentrant `generate` calls on the shared Metal runner and KV cache.
+    private var activeGenerationTask: Task<Void, Never>?
+    private var activeGenerationCancel: (@Sendable () -> Void)?
+    private var activeGenerationToken: UInt64 = 0
+    private var loadGeneration: UInt64 = 0
+
+    func runSerialized<T: Sendable>(
+        _ body: @escaping @Sendable (isolated StreamedMoESession) async throws -> T
+    ) async throws -> T {
+        while let prior = activeGenerationTask {
+            let priorToken = activeGenerationToken
+            activeGenerationCancel?()
+            await prior.value
+            // Clear the finished slot immediately before looping so we never
+            // spin re-awaiting a completed task before its defer runs.
+            if activeGenerationToken == priorToken {
+                activeGenerationTask = nil
+                activeGenerationCancel = nil
+            }
+        }
+        try Task.checkCancellation()
+        activeGenerationToken &+= 1
+        let token = activeGenerationToken
+        let work = Task<T, Error> {
+            try await body(self)
+        }
+        let waiter = Task<Void, Never> {
+            _ = await work.result
+        }
+        activeGenerationTask = waiter
+        activeGenerationCancel = { work.cancel() }
+        defer {
+            if activeGenerationToken == token {
+                activeGenerationTask = nil
+                activeGenerationCancel = nil
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
+    func unload() {
+        loadGeneration &+= 1
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        activeGenerationCancel?()
+        loadedState = nil
+        kvCache = nil
+    }
 
     func load(
         directory: URL,
@@ -137,6 +256,7 @@ private actor StreamedMoESession {
         settings: StreamedMoERuntimeSettings,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
+        let generation = loadGeneration
         guard loadedState == nil else { return }
         if let error = StreamedMoEInstall.validationError(
             at: directory,
@@ -190,6 +310,7 @@ private actor StreamedMoESession {
             vocab: model.config.vocabSize,
             logitSoftcap: Float(model.config.finalLogitSoftcap))
         try Task.checkCancellation()
+        guard loadGeneration == generation else { throw CancellationError() }
 
         loadedState = LoadedState(
             directory: directory,
@@ -212,11 +333,29 @@ private actor StreamedMoESession {
         conversationID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async throws -> Double? {
+        try await runSerialized { session in
+            try await session.performGenerate(
+                history: history,
+                systemPrompt: systemPrompt,
+                temperature: temperature,
+                conversationID: conversationID,
+                onEvent: onEvent)
+        }
+    }
+
+    private func performGenerate(
+        history: [EngineMessage],
+        systemPrompt: String,
+        temperature: Double,
+        conversationID: UUID,
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
+    ) async throws -> Double? {
+        let startGeneration = loadGeneration
         if let prewarmTask {
             await prewarmTask.value
             self.prewarmTask = nil
         }
-        guard let loadedState else {
+        guard loadGeneration == startGeneration, let loadedState else {
             throw EngineError.generationFailed("Model is not loaded.")
         }
         let context = loadedState.context
@@ -257,7 +396,10 @@ private actor StreamedMoESession {
 
         var eventRouter = StreamedMoEEventRouter(
             tokenizer: tokenizer,
-            thinkingEnabled: flint ? true : thinkingEnabled)
+            thinkingEnabled: StreamedMoEEngine.routerThinkingEnabled(
+                architecture: loadedState.architecture,
+                thinkingEnabled: thinkingEnabled,
+                wantsImages: wantsImages))
         let config = GenerationConfig(
             maxNewTokens: maxNewTokens,
             temperature: Float(max(temperature, 0)),
@@ -311,27 +453,36 @@ private actor StreamedMoESession {
                 }
             }
         } catch is CancellationError where allowsRewind && multimodalInput == nil {
+            eventRouter.flushOnCancel(emit: onEvent)
             // Stop lands between tokens, so a rewindable runner still holds a
             // valid prefix of this prompt. Keep it for the next turn.
-            let fed = min(runner.continuationPosition, promptIDs.count)
-            kvCache = fed > 0
-                ? StreamedMoEKVCacheState(
-                    conversationID: conversationID,
-                    systemPrompt: systemPrompt,
-                    thinkingEnabled: thinkingEnabled,
-                    kvTokenIDs: Array(promptIDs.prefix(fed)))
-                : nil
+            if loadGeneration == startGeneration {
+                let fed = min(runner.continuationPosition, promptIDs.count)
+                kvCache = fed > 0
+                    ? StreamedMoEKVCacheState(
+                        conversationID: conversationID,
+                        systemPrompt: systemPrompt,
+                        thinkingEnabled: thinkingEnabled,
+                        kvTokenIDs: Array(promptIDs.prefix(fed)))
+                    : nil
+            }
+            throw CancellationError()
+        } catch is CancellationError {
+            eventRouter.flushOnCancel(emit: onEvent)
+            kvCache = nil
             throw CancellationError()
         } catch {
             kvCache = nil
             throw error
         }
 
-        kvCache = StreamedMoEKVCacheState(
-            conversationID: conversationID,
-            systemPrompt: systemPrompt,
-            thinkingEnabled: thinkingEnabled,
-            kvTokenIDs: result.kvBackedTokenIDs)
+        if loadGeneration == startGeneration {
+            kvCache = StreamedMoEKVCacheState(
+                conversationID: conversationID,
+                systemPrompt: systemPrompt,
+                thinkingEnabled: thinkingEnabled,
+                kvTokenIDs: result.kvBackedTokenIDs)
+        }
 
         eventRouter.finish(emit: onEvent)
         return result.decodeSeconds > 0
@@ -480,13 +631,15 @@ private actor StreamedMoESession {
         vision: VisionRuntime,
         languageModel: Model
     ) throws -> VisionFeatures {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mlx-chat-vision-\(UUID().uuidString).jpg")
         do {
-            try data.write(to: url, options: .atomic)
-            return try vision.encodeImage(
-                at: url,
-                languageModel: languageModel)
+            return try StreamedMoEEngine.withTemporaryImageFile(data) { url in
+                try vision.encodeImage(
+                    at: url,
+                    languageModel: languageModel,
+                    checkCancellation: { try Task.checkCancellation() })
+            }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw EngineError.generationFailed(
                 "Couldn’t encode the attached image: \(String(describing: error))")
@@ -632,6 +785,17 @@ struct StreamedMoEEventRouter {
         }
         leadingOpenBuffer = nil
         router.finish(emit: emit)
+    }
+
+    mutating func flushOnCancel(emit: (EngineEvent) -> Void) {
+        if let pendingOpen = leadingOpenBuffer {
+            leadingOpenBuffer = nil
+            let trimmed = String(pendingOpen.drop(while: { $0.isWhitespace }))
+            if !trimmed.isEmpty, !thoughtOpenMarker.hasPrefix(trimmed) {
+                router.consume(pendingOpen, emit: emit)
+            }
+        }
+        router.flushOnCancel(emit: emit)
     }
 }
 

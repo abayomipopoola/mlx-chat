@@ -27,13 +27,31 @@ struct ModelsPage: View {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// Drops a restricted MLX source row from search results when its
+    /// SSD-streamed replacement is already visible, matching family drill-down.
+    static func deduplicatedSearchResults(
+        _ matches: [CatalogModel],
+        visibleStreamedIDs: Set<String>
+    ) -> [CatalogModel] {
+        matches.filter { model in
+            guard model.backend == .mlx,
+                  model.installRestriction != nil,
+                  let variant = StreamedMoEInstall.variant(forSourceModelID: model.id)
+            else { return true }
+            return !visibleStreamedIDs.contains(variant.modelID)
+        }
+    }
+
     private var searchResults: [CatalogModel] {
         let query = searchText.trimmingCharacters(in: .whitespaces)
-        return chat.modelStore.allModels.filter {
-            isVisibleInModelManager($0)
-                && ($0.displayName.localizedStandardContains(query)
-                    || $0.id.localizedStandardContains(query))
+        let visible = chat.modelStore.allModels.filter { isVisibleInModelManager($0) }
+        let visibleStreamedIDs = Set(
+            visible.filter { $0.backend.isSSDStreamed }.map(\.id))
+        let matches = visible.filter {
+            $0.displayName.localizedStandardContains(query)
+                || $0.id.localizedStandardContains(query)
         }
+        return Self.deduplicatedSearchResults(matches, visibleStreamedIDs: visibleStreamedIDs)
     }
 
     private var openFamily: ModelFamily? {
@@ -160,7 +178,7 @@ struct ModelsPage: View {
             let allModels = chat.modelStore.allModels
             let standardModels = allModels.filter { $0.backend == .mlx }
             let streamedModels = allModels.filter {
-                $0.backend == .streamedMoE && isVisibleInModelManager($0)
+                $0.backend.isSSDStreamed && isVisibleInModelManager($0)
             }
             let membersByFamily = Dictionary(grouping: standardModels) {
                 ModelCatalog.familyID(for: $0)
@@ -189,8 +207,8 @@ struct ModelsPage: View {
                 memberCounts: memberCounts,
                 onAdd: { presentedSheet = .importMLX },
                 onSetupStreamed: presentStreamedSetup,
-                onDownload: { model in
-                    downloadAction(for: model)?()
+                onAddStreamed: { model in
+                    presentedSheet = .download(model: model, initialMode: .ssdStreamed)
                 },
                 onDelete: { deleteCandidate = $0 },
                 onOpenFamily: onOpenFamily)
@@ -213,11 +231,16 @@ struct ModelsPage: View {
     }
 
     private func modelRow(_ model: CatalogModel) -> some View {
-        ModelRow(
+        let supportsSSD = StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id)
+            || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: model.id)
+        return ModelRow(
             model: model,
             onDelete: { deleteCandidate = model },
             onDownload: downloadAction(for: model),
-            onSetupStreamed: model.backend == .streamedMoE
+            onAddStreamed: supportsSSD
+                ? { presentedSheet = .download(model: model, initialMode: .ssdStreamed) }
+                : nil,
+            onSetupStreamed: model.backend.isSSDStreamed
                 ? {
                     presentStreamedSetup(for: model)
                 }
@@ -231,7 +254,8 @@ struct ModelsPage: View {
                 presentedSheet = .download(model: model, initialMode: .mlx)
             }
         }
-        guard StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id) else {
+        guard StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id)
+            || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: model.id) else {
             return nil
         }
         return {
@@ -240,23 +264,35 @@ struct ModelsPage: View {
     }
 
     private func presentStreamedSetup(for streamedModel: CatalogModel) {
-        guard let variant = StreamedMoEInstall.variant(
-            forStreamedModelID: streamedModel.id),
-              let sourceModel = ModelCatalog.model(
-                for: variant.sourceRepoID) else { return }
+        let sourceID = StreamedMoEInstall.variant(
+            forStreamedModelID: streamedModel.id)?.sourceRepoID
+            ?? MLXStreamedInstall.variant(
+                forStreamedModelID: streamedModel.id)?.sourceModelID
+        guard let sourceID,
+              let sourceModel = ModelCatalog.model(for: sourceID) else { return }
         presentedSheet = .download(model: sourceModel, initialMode: .ssdStreamed)
     }
 
     private func delete(_ model: CatalogModel) {
+        if chat.isStreaming, chat.selectedModelID == model.id {
+            removalError = "Stop the current response before removing \(model.displayName)."
+            return
+        }
         chat.runtime.modelDeleted(model.id)
         if model.category == .imported {
-            chat.modelStore.removeImported(model.id)
+            removalError = chat.modelStore.removeImported(model.id)
         } else {
             removalError = chat.modelStore.delete(model.id)
+        }
+        if removalError == nil {
+            chat.handleModelDeleted(model.id)
         }
     }
 
     private func deleteAlertTitle(for model: CatalogModel) -> String {
+        if model.backend == .mlxStreamed {
+            return "Disable SSD-streamed mode?"
+        }
         guard model.backend == .streamedMoE else {
             return "Delete model download?"
         }
@@ -268,12 +304,21 @@ struct ModelsPage: View {
     }
 
     private func deleteActionTitle(for model: CatalogModel) -> String {
+        if model.backend == .mlxStreamed { return "Disable" }
         guard model.backend == .streamedMoE else { return "Delete" }
         return chat.modelStore.streamedModelRemovalKind(for: model.id) == .managed
             ? "Move to Trash" : "Forget"
     }
 
     private func deleteMessage(for model: CatalogModel) -> String {
+        if model.backend == .mlxStreamed {
+            return "Remove \(model.displayName) from SSD-Streamed Models? The shared MLX weights stay on disk."
+        }
+        if model.backend == .mlx,
+           let dependent = MLXStreamedInstall.variant(forSourceModelID: model.id),
+           chat.modelStore.isMLXStreamedEnabled(dependent.modelID) {
+            return "Delete \(model.displayName) download? The shared model files are removed from disk, which also disables SSD-streamed mode."
+        }
         guard model.backend == .streamedMoE else {
             return "Delete \(model.displayName) download? The model files are removed from disk. You can download them again anytime."
         }
@@ -300,7 +345,7 @@ private struct ModelsOverview: View {
     let memberCounts: [String: Int]
     let onAdd: () -> Void
     let onSetupStreamed: (CatalogModel) -> Void
-    let onDownload: (CatalogModel) -> Void
+    let onAddStreamed: (CatalogModel) -> Void
     let onDelete: (CatalogModel) -> Void
     let onOpenFamily: (String) -> Void
 
@@ -331,9 +376,9 @@ private struct ModelsOverview: View {
                 ModelRow(
                     model: model,
                     onDelete: { onDelete(model) },
-                    onDownload: StreamedMoEInstall.supportsSSDStreaming(
-                        sourceModelID: model.id)
-                        ? { onDownload(model) }
+                    onAddStreamed: (StreamedMoEInstall.supportsSSDStreaming(sourceModelID: model.id)
+                        || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: model.id))
+                        ? { onAddStreamed(model) }
                         : nil)
             }
         }

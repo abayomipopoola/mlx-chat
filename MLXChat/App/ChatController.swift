@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import SwiftData
 
 /// Orchestrates a chat turn: engine resolution (download + load), streaming,
 /// think-phase routing, throttled UI flushes, errors, stop/regenerate.
@@ -13,13 +12,13 @@ final class ChatController {
     var conversationStore: ConversationStore? {
         didSet {
             conversationStore?.onSaveError = { [weak self] error in
-                self?.errorBanner = "Couldn't save chat history: \(error.localizedDescription)"
+                self?.setErrorBanner("Couldn't save chat history: \(error.localizedDescription)")
             }
             conversationStore?.onSaveSuccess = { [weak self] in
                 guard let self, self.errorBanner?.hasPrefix("Couldn't save chat history:") == true else {
                     return
                 }
-                self.errorBanner = nil
+                self.dismissErrorBanner()
             }
         }
     }
@@ -64,12 +63,30 @@ final class ChatController {
     /// Share of the prompt the engine has read, before any output arrives;
     /// nil when it does not report or once output starts.
     private(set) var prefillProgress: Double?
-    var errorBanner: String?
+    private var storedErrorBanner: String?
     /// Conversation eligible for Retry after a failed (empty) turn.
     private var retryConversation: Conversation?
 
+    /// Single source of truth for the banner + optional retry target. Direct
+    /// writes via `errorBanner = ...` always clear any stale `retryConversation`.
+    var errorBanner: String? {
+        get { storedErrorBanner }
+        set { setErrorBanner(newValue, retryConversation: nil) }
+    }
+
+    func setErrorBanner(_ message: String?, retryConversation: Conversation? = nil) {
+        storedErrorBanner = message
+        self.retryConversation = message == nil ? nil : retryConversation
+    }
+
+    func dismissErrorBanner() {
+        setErrorBanner(nil, retryConversation: nil)
+    }
+
     private var generationTask: Task<Void, Never>?
     private var flushTask: Task<Void, Never>?
+    private var warmLoadTask: Task<Void, Never>?
+    private var activeTurnToken: UInt64 = 0
     private var activeMessage: ChatMessage?
     private var contentBuffer = ""
     private var thinkingBuffer = ""
@@ -86,8 +103,63 @@ final class ChatController {
         runtime = EngineRuntime(modelStore: store)
         let saved = UserDefaults.standard.string(forKey: Keys.selectedModelID)
             ?? Keys.Defaults.selectedModelID
-        selectedModelID = saved == appleIntelligenceEngineID || store.isUsableLocalSelection(saved)
-            ? saved : appleIntelligenceEngineID
+        if saved == appleIntelligenceEngineID || store.isUsableLocalSelection(saved) {
+            selectedModelID = saved
+        } else {
+            let usable = store.allModels
+                .filter { store.isUsableLocalSelection($0.id) }
+                .map(\.id)
+            selectedModelID = Self.resolveFallbackModelID(
+                excluding: saved,
+                appleIntelligenceAvailable: AppleIntelligenceEngine.isAvailable,
+                usableLocalModelIDs: usable)
+        }
+    }
+
+    /// Fallback engine when the selected local model is missing, deleted, or ejected:
+    /// Apple Intelligence if available, else the first usable local model not matching
+    /// `excludedID`, else Apple Intelligence (which shows the setup hint).
+    nonisolated static func resolveFallbackModelID(
+        excluding excludedID: String? = nil,
+        appleIntelligenceAvailable: Bool,
+        usableLocalModelIDs: [String]
+    ) -> String {
+        if appleIntelligenceAvailable {
+            return appleIntelligenceEngineID
+        }
+        if let first = usableLocalModelIDs.first(where: { $0 != excludedID }) {
+            return first
+        }
+        return appleIntelligenceEngineID
+    }
+
+    func fallbackModelID(excluding excludedID: String? = nil) -> String {
+        let usable = modelStore.allModels
+            .filter { $0.id != excludedID && modelStore.isUsableLocalSelection($0.id) }
+            .map(\.id)
+        return Self.resolveFallbackModelID(
+            excluding: excludedID,
+            appleIntelligenceAvailable: AppleIntelligenceEngine.isAvailable,
+            usableLocalModelIDs: usable)
+    }
+
+    func handleModelDeleted(_ id: String) {
+        runtime.modelDeleted(id)
+        let selectionMatchesDeleted = selectedModelID == id
+            || MLXStreamedInstall.variant(forStreamedModelID: selectedModelID)?.sourceModelID == id
+        if selectionMatchesDeleted, !isStreaming {
+            selectedModelID = fallbackModelID(excluding: selectedModelID)
+        }
+    }
+
+    /// Frees the resident local model and falls back per A1 policy.
+    func ejectResidentModel() {
+        guard !isStreaming else { return }
+        let current = selectedModelID
+        runtime.unloadCurrent()
+        if current != appleIntelligenceEngineID {
+            selectedModelID = fallbackModelID(excluding: current)
+        }
     }
 
     var selectedModelDisplayName: String {
@@ -140,8 +212,7 @@ final class ChatController {
         guard !isStreaming, !isSelectedModelPreparing, let store = conversationStore else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || image != nil || attachment != nil else { return }
-        errorBanner = nil
-        retryConversation = nil
+        dismissErrorBanner()
         store.appendMessage(
             role: "user",
             content: trimmed,
@@ -165,19 +236,22 @@ final class ChatController {
     }
 
     func retry() {
-        guard let conversation = retryConversation else { return }
-        errorBanner = nil
-        retryConversation = nil
+        guard !isStreaming, !isSelectedModelPreparing,
+              let conversation = retryConversation,
+              conversationStore != nil
+        else { return }
+        dismissErrorBanner()
         startAssistantTurn(in: conversation)
     }
 
     /// Regenerate the LAST assistant message.
     func regenerate(_ message: ChatMessage, in conversation: Conversation) {
-        guard !isStreaming, message.role == "assistant",
+        guard !isStreaming, !isSelectedModelPreparing,
+              message.role == "assistant",
               conversation.orderedMessages.last?.id == message.id,
               let store = conversationStore
         else { return }
-        errorBanner = nil
+        dismissErrorBanner()
         store.deleteMessage(message)
         startAssistantTurn(in: conversation)
     }
@@ -192,7 +266,7 @@ final class ChatController {
         let id = selectedModelID
         guard id != appleIntelligenceEngineID, modelStore.isAvailable(id) else { return }
         guard runtime.loadedModelID != id else { return }
-        Task { [weak self] in
+        scheduleWarmLoad { [weak self] in
             _ = try? await self?.runtime.engine(for: id)
         }
     }
@@ -202,6 +276,8 @@ final class ChatController {
     private func warmSwitchedModel() {
         let id = selectedModelID
         let name = selectedModelDisplayName
+        warmLoadTask?.cancel()
+        warmLoadTask = nil
         if id == appleIntelligenceEngineID {
             // Release any resident local weights right away — previously they
             // stayed in RAM until the idle auto-unload fired. Never yank
@@ -215,11 +291,22 @@ final class ChatController {
             showSwitchToast("Switched to \(name)")
             return
         }
-        Task { [weak self] in
+        scheduleWarmLoad { [weak self] in
             guard let self else { return }
-            if (try? await self.runtime.engine(for: id)) != nil, self.selectedModelID == id {
+            if (try? await self.runtime.engine(for: id)) != nil,
+               !Task.isCancelled,
+               self.selectedModelID == id {
                 self.showSwitchToast("Switched to \(name)")
             }
+        }
+    }
+
+    var currentWarmLoadTask: Task<Void, Never>? { warmLoadTask }
+
+    func scheduleWarmLoad(_ work: @escaping @MainActor () async -> Void) {
+        warmLoadTask?.cancel()
+        warmLoadTask = Task {
+            await work()
         }
     }
 
@@ -243,11 +330,26 @@ final class ChatController {
 
     func conversationWillBeDeleted(_ conversation: Conversation) {
         if activeMessage?.conversation?.id == conversation.id {
-            stop()
+            // Invalidate the in-flight turn immediately so async cancellation
+            // cannot mutate, delete, or save already-deleted SwiftData rows.
+            activeTurnToken &+= 1
+            flushTask?.cancel()
+            flushTask = nil
+            generationTask?.cancel()
+            generationTask = nil
+            activeMessage = nil
+            prefillProgress = nil
+            isStreaming = false
+            streamingMessageID = nil
+            isInThinkPhase = false
+            contentBuffer = ""
+            thinkingBuffer = ""
+            contentCharacterCount = 0
+            thinkingCharacterCount = 0
+            runtime.endGenerating()
         }
         if retryConversation?.id == conversation.id {
-            retryConversation = nil
-            errorBanner = nil
+            dismissErrorBanner()
         }
     }
 
@@ -280,6 +382,10 @@ final class ChatController {
         guard conversation.orderedMessages.last?.isUser == true else { return }
 
         let modelID = selectedModelID
+        warmLoadTask?.cancel()
+        warmLoadTask = nil
+        activeTurnToken &+= 1
+        let turnToken = activeTurnToken
 
         let assistant = store.appendMessage(
             role: "assistant", content: "", to: conversation, modelID: modelID)
@@ -333,13 +439,15 @@ final class ChatController {
             var sawContent = false
             do {
                 let engine = try await self.runtime.engine(for: modelID)
+                guard self.activeTurnToken == turnToken else { return }
                 self.runtime.beginGenerating(id: modelID)
-                self.startFlushLoop()
+                self.startFlushLoop(turnToken: turnToken)
 
                 for try await event in engine.stream(
                     history: history, systemPrompt: systemPrompt,
                     temperature: temperature, conversationID: conversationID
                 ) {
+                    guard self.activeTurnToken == turnToken else { return }
                     switch event {
                     case .prefill(let done, let total):
                         if !sawContent, thinkStartedAt == nil, total > 0 {
@@ -348,7 +456,7 @@ final class ChatController {
                     case .delta(let delta):
                         self.prefillProgress = nil
                         self.contentBuffer += delta
-                        self.contentCharacterCount += delta.count
+                        self.contentCharacterCount += delta.utf8.count
                         if !sawContent {
                             sawContent = true
                             self.isInThinkPhase = false
@@ -359,7 +467,7 @@ final class ChatController {
                     case .thinkingDelta(let delta):
                         self.prefillProgress = nil
                         self.thinkingBuffer += delta
-                        self.thinkingCharacterCount += delta.count
+                        self.thinkingCharacterCount += delta.utf8.count
                         if thinkStartedAt == nil {
                             thinkStartedAt = .now
                             self.isInThinkPhase = true
@@ -376,9 +484,11 @@ final class ChatController {
             } catch is CancellationError {
                 // Stop button: keep partial text, no banner.
             } catch {
-                self.errorBanner = error.localizedDescription
+                if self.activeTurnToken == turnToken {
+                    self.setErrorBanner(error.localizedDescription)
+                }
             }
-            self.finishTurn(in: conversation)
+            self.finishTurn(in: conversation, turnToken: turnToken)
         }
     }
 
@@ -392,7 +502,8 @@ final class ChatController {
         return Array(messages.suffix(from: messages.index(after: boundary)))
     }
 
-    private func finishTurn(in conversation: Conversation) {
+    private func finishTurn(in conversation: Conversation, turnToken: UInt64) {
+        guard activeTurnToken == turnToken else { return }
         prefillProgress = nil
         flushTask?.cancel()
         flushTask = nil
@@ -403,7 +514,9 @@ final class ChatController {
             // Nothing arrived (load/download failure or instant error): drop the
             // empty assistant message and offer Retry.
             conversationStore?.deleteMessage(message)
-            if errorBanner != nil { retryConversation = conversation }
+            if let banner = errorBanner {
+                setErrorBanner(banner, retryConversation: conversation)
+            }
         }
 
         conversationStore?.save()
@@ -417,10 +530,10 @@ final class ChatController {
 
     // MARK: - Throttled UI flush
 
-    private func startFlushLoop() {
+    private func startFlushLoop(turnToken: UInt64) {
         flushTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
+                guard let self, self.activeTurnToken == turnToken else { return }
                 self.flushBuffers()
                 let visibleCharacters = max(
                     self.contentCharacterCount,

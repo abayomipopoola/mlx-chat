@@ -77,6 +77,7 @@ import MLXVLM
         await PrismHadamardQwen35.register()
         await LFM3.register()
         await Spark25.register()
+        await Inkling2.register()
         for type in ModelSupport.supportedModelTypes {
             let inLLM = await LLMTypeRegistry.shared.contains(type)
             let inVLM = await VLMTypeRegistry.shared.contains(type)

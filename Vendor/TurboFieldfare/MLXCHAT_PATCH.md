@@ -253,3 +253,66 @@ bytes back into U32 words.
 - Q/K/V is one fused GEMV (`FusedQKVGEMV`), Q/K norms and rotary encoding are
   one kernel (`flint_qk_norm_rope`), and each residual add also writes the
   next RMSNorm (`flint_residual_rmsnorm`, bit-identical to the two kernels).
+
+## Audit hardening fixes (local)
+
+CPU-side bounds, arithmetic, validation, and lifecycle fixes from the full-repo
+audit:
+
+- `AUDIT-33` (`E-B1`, `FlintForwardRunner.swift`): Track `highWaterPosition`
+  across decode/prefill writes and reset it in `reset()`; check
+  `highWaterPosition - expectedPosition <= maxRewindDistance` in
+  `prepareForContinuation` (and `keyCacheRow`) so repeated rewinds cannot read
+  overwritten sliding KV slots, and clamp `prefillChunked` chunk size to at
+  least 1 when `maxRewindDistance == 0`. Added `internal static func canContinue`
+  for unit testing.
+- `AUDIT-34` (`E-B2`, `ResidentIndex.swift`): Overflow-checked entry-table
+  bounds (`headerBytes + entryCount * entryBytes <= regionLen` and
+  `regionLen <= indexBuf.count`) in `parseLegacyEntries` before reading raw
+  pointers. Widened `parseLegacyEntries` from `private` to `internal` for unit
+  testing.
+- `AUDIT-35` (`E-B2`, `ManifestReader.swift`): Convert
+  `fullAttentionLayerMask` elements with `UInt8(exactly:)` instead of trapping
+  `UInt8(_:)`, throwing `ModelError.archMismatch` on out-of-range values.
+- `AUDIT-36` (`E-B6`, `Sampler.swift`): Validate
+  `repetitionPenalty.isFinite && repetitionPenalty > 0` in
+  `GenerationConfig.validate()`.
+- `AUDIT-37` (`E-B7`, `GemmaDecoding.swift`): Rewrote
+  `PartialByteBuffer.drainCompleteUTF8()` iteratively so long runs of invalid
+  UTF-8 bytes cannot overflow the call stack.
+- `AUDIT-38` (`E-B8`, `ImageMetadataReader.swift`): Overflow-checked bit-depth
+  byte estimate rounding up `bytesPerChannel = (max(depth, 1) + 7) / 8` (so
+  12-bit channels estimate 2 bytes instead of 1) and rejecting negative depth.
+  Added `internal static func decodedByteEstimate(pixels:depth:)` for unit
+  testing.
+- `AUDIT-39` (`F-B17`, `DiskSpaceChecker.swift`): `directoryForProbe` only
+  strips the last path component when an existing regular file is passed, so
+  dot-containing directory names (e.g. `/Volumes/External.SSD`) are probed and
+  created directly.
+- `AUDIT-40` (`F-B18`, `Safetensors.swift`): Guard `fileSize >= 8`,
+  `end >= begin`, strict non-boolean non-negative `UInt64` parsing, and
+  overflow-checked offset/shape arithmetic in `parseHeaderBytes`.
+- `AUDIT-41` (`F-B24`, `RangeCopyPlanner.swift`): Clamp
+  `remoteGapBytesDownloaded` to `downloaded > copied ? downloaded - copied : 0`
+  in both `plan(vision:...)` and `plan(repackPlan:...)` so overlapping source
+  ranges do not underflow.
+- `AUDIT-42` (`F-B29`, `ArchInfo.swift`): Validate
+  `hidden > 0 && heads > 0 && hidden % heads == 0` in `loadLFM2MoE` before
+  dividing `hidden / heads`.
+- `AUDIT-43` (`F-B22`, `GTurboLayoutValidator.swift`): Track `seenLayers` to
+  reject duplicate layer indices and verify `seenLayers == Set(plan.layers.map(\.layerIndex))`
+  so empty or missing layers fail validation.
+- `WAVE2-20` (`VerifiedInstallTool.swift`): Route manifest loading, packed-expert
+  validation, per-file size/SHA-256 verification, unexpected-entry scanning, and
+  atomic receipt writing through `GTurboDirectoryAccess` (`openat` + `O_NOFOLLOW`
+  + `S_IFREG` + `GTurboPathValidator`), eliminating TOCTOU by checking size and
+  digest on the same file descriptor, rejecting non-positive dimensions,
+  duplicate `layer.layer` indices, unsafe `layer.file` basenames, and `UInt64`
+  overflows in layer size and verified byte totals.
+- `WAVE2-21` (`VisionPackVerifier.swift`): Open each declared vision pack file
+  once via `GTurboDirectoryAccess` (and read the text manifest via
+  `GTurboDirectoryAccess`) so size and SHA-256 checks stay pinned to `rootFD`
+  without symlink traversal, propagate `onHashProgress` cancellation errors
+  instead of swallowing via `try?`, overflow-check byte totals, and replace the
+  `weightsFile` force-unwrap with a typed `RepackError.configurationInvalid`.
+

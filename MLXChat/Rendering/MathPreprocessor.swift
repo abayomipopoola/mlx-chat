@@ -8,7 +8,23 @@ import Foundation
 /// - Inline math (`\(…\)`, and `$…$` that looks like LaTeX) → `![math](swiftmath://i/<b64url>)`
 /// - Bare `\boxed{X}` in prose → inline image. SwaTex renders `\boxed` itself.
 enum MathPreprocessor {
+    /// Single scalar scan guarding the regex pipeline: plain prose containing
+    /// none of `$`, `\`, `` ` ``, or Unicode big operators (`Σ∑Π∏∫`) can never
+    /// match any math rewrite and returns immediately with zero allocations.
+    static func hasPotentialMath(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x24, 0x5C, 0x60, 0x03A3, 0x2211, 0x03A0, 0x220F, 0x222B:
+                return true
+            default:
+                continue
+            }
+        }
+        return false
+    }
+
     static func preprocess(_ markdown: String) -> String {
+        guard hasPotentialMath(markdown) else { return markdown }
         // Math dressed up as a code fence renders as an equation instead.
         let markdown = repairAccidentalIndentedMath(
             convertMathFences(markdown))
@@ -47,17 +63,59 @@ enum MathPreprocessor {
     }
 
     private static func transformOutsideInlineCode(_ markdown: String) -> String {
-        // Transform only the gaps between inline code spans.
-        let codeSpan = /(`{1,3})[^`]*?\1/
+        // Transform only the gaps between CommonMark inline code spans.
+        let spans = inlineCodeSpanRanges(in: markdown)
+        guard !spans.isEmpty else { return transform(markdown) }
         var result = ""
         var cursor = markdown.startIndex
-        for match in markdown.matches(of: codeSpan) {
-            result += transform(String(markdown[cursor..<match.range.lowerBound]))
-            result += markdown[match.range]
-            cursor = match.range.upperBound
+        for range in spans {
+            result += transform(String(markdown[cursor..<range.lowerBound]))
+            result += markdown[range]
+            cursor = range.upperBound
         }
         result += transform(String(markdown[cursor...]))
         return result
+    }
+
+    /// Scans CommonMark inline code spans of arbitrary backtick run length,
+    /// allowing shorter backtick runs inside a longer delimiter (e.g. `` `$x_1$` ``).
+    private static func inlineCodeSpanRanges(in text: String) -> [Range<String.Index>] {
+        var ranges: [Range<String.Index>] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard text[index] == "`" else {
+                index = text.index(after: index)
+                continue
+            }
+            let openStart = index
+            var openLength = 0
+            while index < text.endIndex, text[index] == "`" {
+                openLength += 1
+                index = text.index(after: index)
+            }
+            var scan = index
+            var matchedEnd: String.Index?
+            while scan < text.endIndex {
+                if text[scan] == "`" {
+                    var closeLength = 0
+                    while scan < text.endIndex, text[scan] == "`" {
+                        closeLength += 1
+                        scan = text.index(after: scan)
+                    }
+                    if closeLength == openLength {
+                        matchedEnd = scan
+                        break
+                    }
+                } else {
+                    scan = text.index(after: scan)
+                }
+            }
+            if let matchedEnd {
+                ranges.append(openStart..<matchedEnd)
+                index = matchedEnd
+            }
+        }
+        return ranges
     }
 
     // MARK: - Code-block protection
@@ -133,7 +191,10 @@ enum MathPreprocessor {
         var start = text.startIndex
         while start < text.endIndex {
             let newline = text[start...].firstIndex(of: "\n")
-            let contentEnd = newline ?? text.endIndex
+            var contentEnd = newline ?? text.endIndex
+            if contentEnd > start, text[text.index(before: contentEnd)] == "\r" {
+                contentEnd = text.index(before: contentEnd)
+            }
             let fullEnd = newline.map { text.index(after: $0) } ?? text.endIndex
             lines.append(LineSlice(
                 contentRange: start..<contentEnd,
@@ -216,7 +277,9 @@ enum MathPreprocessor {
         var fence: (marker: Character, minimumLength: Int)?
 
         for index in lines.indices {
-            let original = lines[index]
+            let rawLine = lines[index]
+            let hasCR = rawLine.hasSuffix("\r")
+            let original = hasCR ? String(rawLine.dropLast()) : rawLine
             let line = Substring(original)
             if let currentFence = fence {
                 if isClosingFence(
@@ -248,9 +311,9 @@ enum MathPreprocessor {
             guard !candidate.isEmpty, !looksLikeSourceCode(candidate) else { continue }
 
             if transform(candidate) != candidate {
-                lines[index] = dedented
+                lines[index] = hasCR ? dedented + "\r" : dedented
             } else if looksLikeBareLatexEquation(candidate) {
-                lines[index] = "$$\(candidate)$$"
+                lines[index] = hasCR ? "$$\(candidate)$$\r" : "$$\(candidate)$$"
             }
         }
         return lines.joined(separator: "\n")
@@ -295,14 +358,14 @@ enum MathPreprocessor {
     private static func convertMathFences(_ text: String) -> String {
         var output = text
         output = output.replacing(
-            /(?m)^```[ \t]*(?:math|latex|tex)[ \t]*\n([\s\S]{1,2000}?)\n```[ \t]*$/
+            /(?m)^```[ \t]*(?:math|latex|tex)[ \t]*\r?\n([\s\S]{1,2000}?)\r?\n```[ \t]*\r?$/
         ) { match in
             var latex = String(match.1).trimmingCharacters(in: .whitespacesAndNewlines)
             latex = latex.trimmingCharacters(in: CharacterSet(charactersIn: "$"))
             return displayImage(latex)
         }
         output = output.replacing(
-            /(?m)^```[ \t]*(?:text)?[ \t]*\n[ \t]*\$\$?([^$\n]{1,300}?)\$\$?[ \t]*\n```[ \t]*$/
+            /(?m)^```[ \t]*(?:text)?[ \t]*\r?\n[ \t]*\$\$?([^$\r\n]{1,300}?)\$\$?[ \t]*\r?\n```[ \t]*\r?$/
         ) { match in
             displayImage(String(match.1))
         }
@@ -322,38 +385,128 @@ enum MathPreprocessor {
         output = output.replacing(/(?s)\\\((.{1,300}?)\\\)/) { match in
             inlineMath(String(match.1))
         }
-        output = output.replacing(/\$[ \t]*([^\s$][^$\n]{0,118}?[^\s$]|[^\s$])[ \t]*\$/) { match in
-            let latex = String(match.1)
-            // Simple expressions ($i$, $dp[i]$, $dp[0] = 1$) become math-italic
-            // Unicode TEXT — it sits on the text baseline perfectly, unlike an
-            // image. Must contain a letter so "$100$" stays money-like.
-            // Trailing `[ \t]*` before the closing `$` can pair `$5 and $10`
-            // or `$x and $y` as one span; keep those English phrases literal
-            // unless the capture already looks like an expression.
-            if latex.wholeMatch(of: /[A-Za-z0-9'\[\](),=+\-*\/×·. ]{1,60}/) != nil,
-               latex.contains(/[A-Za-z]/),
-               !(latex.contains(" ") && latex.wholeMatch(of: /.*[=+\-*\/×·].*/) == nil) {
-                return mathItalic(latex)
-            }
-            // Paired abs bars (`$|Pos(B) - Pos(D)| = 1$`) are math, but a lone
-            // prose pipe is not. Do not add `|` to the italic charset — that
-            // path is text, and this span needs a math image.
-            if looksLikePairedPipeAbs(latex) {
-                return inlineImage(latex)
-            }
-            // `$P ⇔ Q$` has no TeX commands; SwaTex still typesets the Unicode.
-            if containsMathUnicode(latex) {
-                return inlineImage(latex)
-            }
-            // Anything with real LaTeX syntax renders as an image.
-            guard latex.contains(/[\\^_{}<>]/) else { return String(match.0) }
-            return inlineImage(latex)
-        }
+        output = replacingSingleDollarMath(in: output)
         output = wrapUnicodeBigOperators(output)
         // `transform` only receives slices outside code blocks, so bare boxed
         // expressions can be converted directly without scanning for fences again.
         output = convertBareBoxed(output)
         return output
+    }
+
+    private static func isEscaped(_ text: String, at index: String.Index) -> Bool {
+        var backslashes = 0
+        var cursor = index
+        while cursor > text.startIndex {
+            let prev = text.index(before: cursor)
+            if text[prev] == "\\" {
+                backslashes += 1
+                cursor = prev
+            } else {
+                break
+            }
+        }
+        return !backslashes.isMultiple(of: 2)
+    }
+
+    private static func replacingSingleDollarMath(in text: String) -> String {
+        guard text.contains("$") else { return text }
+        var result = ""
+        result.reserveCapacity(text.count)
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            guard let openIndex = text[index...].firstIndex(of: "$") else {
+                result += text[index...]
+                break
+            }
+            result += text[index..<openIndex]
+            let afterOpen = text.index(after: openIndex)
+
+            if isEscaped(text, at: openIndex) || afterOpen >= text.endIndex {
+                result.append("$")
+                index = afterOpen
+                continue
+            }
+
+            // Scan to the next unescaped `$` on the same line within the span cap.
+            var scan = afterOpen
+            var closeIndex: String.Index?
+            var count = 0
+            while scan < text.endIndex, count <= 140 {
+                let ch = text[scan]
+                if ch == "\n" || ch == "\r" { break }
+                if ch == "$", !isEscaped(text, at: scan) {
+                    closeIndex = scan
+                    break
+                }
+                scan = text.index(after: scan)
+                count += 1
+            }
+
+            guard let close = closeIndex else {
+                result.append("$")
+                index = afterOpen
+                continue
+            }
+
+            let afterClose = text.index(after: close)
+            let charAfterClose: Character? = afterClose < text.endIndex ? text[afterClose] : nil
+            let nextIsDigit = charAfterClose.map { $0 >= "0" && $0 <= "9" } ?? false
+
+            let rawInner = text[afterOpen..<close]
+            let trimmed = rawInner.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+            let hasTrailingSpaceBeforeClose = rawInner.last == " " || rawInner.last == "\t"
+            let nextIsAlnum = charAfterClose.map { $0.isLetter || $0.isNumber } ?? false
+
+            if !nextIsDigit, !trimmed.isEmpty, trimmed.count <= 120,
+               let rendered = renderSingleDollarMath(
+                latex: trimmed,
+                hasTrailingSpaceBeforeClose: hasTrailingSpaceBeforeClose,
+                nextIsAlnum: nextIsAlnum)
+            {
+                result += rendered
+                index = afterClose
+            } else {
+                // Emit only the opening `$` and advance by one character so a
+                // currency amount before real math (`$5 and $x^2$`) still finds
+                // the math span instead of consuming its opening `$`.
+                result.append("$")
+                index = afterOpen
+            }
+        }
+
+        return result
+    }
+
+    private static func renderSingleDollarMath(
+        latex: String,
+        hasTrailingSpaceBeforeClose: Bool,
+        nextIsAlnum: Bool
+    ) -> String? {
+        // Simple expressions ($i$, $dp[i]$, $dp[0] = 1$) become math-italic
+        // Unicode TEXT — it sits on the text baseline perfectly, unlike an
+        // image. Must contain a letter so "$100$" stays money-like.
+        // Trailing space before the closing `$` followed by an identifier/number
+        // pairs two separate `$`-prefixed prose tokens (`$5/day and $ten`, `$a+b and $c`).
+        if latex.wholeMatch(of: /[A-Za-z0-9'\[\](),=+\-*\/×·. ]{1,60}/) != nil,
+           latex.contains(/[A-Za-z]/),
+           !(hasTrailingSpaceBeforeClose && nextIsAlnum),
+           !(latex.contains(" ") && latex.wholeMatch(of: /.*[=+\-*\/×·].*/) == nil) {
+            return mathItalic(latex)
+        }
+        // Paired abs bars (`$|Pos(B) - Pos(D)| = 1$`) are math, but a lone
+        // prose pipe is not. Do not add `|` to the italic charset — that
+        // path is text, and this span needs a math image.
+        if looksLikePairedPipeAbs(latex) {
+            return inlineImage(latex)
+        }
+        // `$P ⇔ Q$` has no TeX commands; SwaTex still typesets the Unicode.
+        if containsMathUnicode(latex) {
+            return inlineImage(latex)
+        }
+        // Anything with real LaTeX syntax renders as an image.
+        guard latex.contains(/[\\^_{}<>]/) else { return nil }
+        return inlineImage(latex)
     }
 
     /// Unicode math in a `$…$` span with no TeX commands. Prose operators
@@ -407,8 +560,8 @@ enum MathPreprocessor {
         let lineStart = text[..<range.lowerBound].lastIndex(of: "\n")
             .map { text.index(after: $0) } ?? text.startIndex
         let lineEnd = text[range.upperBound...].firstIndex(of: "\n") ?? text.endIndex
-        return text[lineStart..<range.lowerBound].allSatisfy(" \t".contains)
-            && text[range.upperBound..<lineEnd].allSatisfy(" \t".contains)
+        return text[lineStart..<range.lowerBound].allSatisfy(" \t\r".contains)
+            && text[range.upperBound..<lineEnd].allSatisfy(" \t\r".contains)
     }
 
     private static func displayMath(_ latex: String) -> String {

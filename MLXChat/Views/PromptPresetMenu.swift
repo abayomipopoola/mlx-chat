@@ -81,7 +81,6 @@ struct PromptPresetPanel: View {
     private func choose(_ preset: PromptPreset) {
         selectedRaw = preset.rawValue
         UserDefaults.standard.set(preset.rawValue, forKey: Keys.promptPreset)
-        UserDefaults.standard.synchronize()
         dropdown.open = nil
     }
 
@@ -114,33 +113,50 @@ struct PromptPresetPanel: View {
     }
 
     private func presetRow(_ preset: PromptPreset) -> some View {
-        HStack(spacing: 6) {
-            // Checkmark slot, reserved for every row so names stay aligned
-            // (native-menu convention, same as the model picker).
-            Image(systemName: "checkmark")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.primary)
-                .opacity(current == preset ? 1 : 0)
-                .frame(width: 14)
+        Button {
+            choose(preset)
+        } label: {
+            HStack(spacing: 6) {
+                // Checkmark slot, reserved for every row so names stay aligned
+                // and inside the button label so the full row is clickable.
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .opacity(current == preset ? 1 : 0)
+                    .frame(width: 14)
 
-            Button {
-                choose(preset)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: preset.icon)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(tint(for: preset))
-                        .frame(width: 16)
-                    Text(preset.displayName)
-                        .font(Studio.sans(13))
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                Image(systemName: preset.icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(tint(for: preset))
+                    .frame(width: 16)
+                Text(preset.displayName)
+                    .font(Studio.sans(13))
+                    .lineLimit(1)
             }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .padding(.vertical, 3)
+    }
+}
+
+/// Staged edits for `EditPromptSheet`; nothing persists to UserDefaults until Save.
+struct EditPromptDraft {
+    let preset: PromptPreset
+    var text: String
+    var temperature: Double
+
+    init(preset: PromptPreset, defaults: UserDefaults = .standard) {
+        self.preset = preset
+        self.text = PromptPresets.effectiveText(for: preset)
+        self.temperature = defaults.object(forKey: Keys.personalizationTemperature) as? Double
+            ?? Keys.Defaults.personalizationTemperature
+    }
+
+    func save(defaults: UserDefaults = .standard) {
+        PromptPresets.setOverride(text, for: preset)
+        defaults.set(temperature, forKey: Keys.personalizationTemperature)
     }
 }
 
@@ -148,9 +164,7 @@ struct PromptPresetPanel: View {
 struct EditPromptSheet: View {
     let preset: PromptPreset
     @Environment(\.dismiss) private var dismiss
-    @State private var text: String
-    /// Global sampling temperature — applies to every preset.
-    @AppStorage(Keys.personalizationTemperature) private var temperature = Keys.Defaults.personalizationTemperature
+    @State private var draft: EditPromptDraft
 
     private static let temperaturePresets: [(label: String, value: Double)] = [
         ("Precise – 0.1", 0.1),
@@ -161,7 +175,7 @@ struct EditPromptSheet: View {
 
     init(preset: PromptPreset) {
         self.preset = preset
-        _text = State(initialValue: PromptPresets.effectiveText(for: preset))
+        _draft = State(initialValue: EditPromptDraft(preset: preset))
     }
 
     var body: some View {
@@ -186,7 +200,7 @@ struct EditPromptSheet: View {
             .padding(16)
             .background(Color.sidebarBackground.opacity(0.65))
 
-            TextEditor(text: $text)
+            TextEditor(text: $draft.text)
                 .font(.system(size: 13, design: .monospaced))
                 .scrollContentBackground(.hidden)
                 .padding(12)
@@ -202,7 +216,7 @@ struct EditPromptSheet: View {
                     .font(Studio.sans(10))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Picker("", selection: $temperature) {
+                Picker("", selection: $draft.temperature) {
                     ForEach(Self.temperaturePresets, id: \.value) { item in
                         Text(item.label).tag(item.value)
                     }
@@ -217,14 +231,14 @@ struct EditPromptSheet: View {
             Divider()
 
             HStack {
-                Text("\(text.count) characters")
+                Text("\(draft.text.count) characters")
                     .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Reset to Default") { text = preset.defaultText }
+                Button("Reset to Default") { draft.text = preset.defaultText }
                     .buttonStyle(.bordered)
                     .tint(Color.brandGreen)
-                    .disabled(text == preset.defaultText)
+                    .disabled(draft.text == preset.defaultText)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -234,7 +248,7 @@ struct EditPromptSheet: View {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
-                    PromptPresets.setOverride(text, for: preset)
+                    draft.save()
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)

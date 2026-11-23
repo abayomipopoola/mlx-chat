@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import HuggingFace
-import MLXLMCommon
 import Observation
 
 enum StreamedModelRemovalKind: Equatable, Sendable {
@@ -30,18 +29,19 @@ enum StreamedManagedInstallState: Equatable, Sendable {
 @Observable
 final class ModelStore {
     /// Holds one balanced security-scope lease for a registered external model.
-    /// Replacing, forgetting, or releasing the store closes the lease in deinit.
+    /// Retaining the original scoped URL ensures `stopAccessingSecurityScopedResource`
+    /// balances the exact URL instance opened before standardization.
     private final class StreamedModelRegistration {
         let directory: URL
-        private let closesSecurityScope: Bool
+        private let securityScopedURL: URL?
 
-        init(directory: URL, closesSecurityScope: Bool) {
-            self.directory = directory
-            self.closesSecurityScope = closesSecurityScope
+        init(directory: URL, securityScopedURL: URL?) {
+            self.directory = directory.standardizedFileURL
+            self.securityScopedURL = securityScopedURL
         }
 
         deinit {
-            if closesSecurityScope { directory.stopAccessingSecurityScopedResource() }
+            securityScopedURL?.stopAccessingSecurityScopedResource()
         }
     }
 
@@ -63,7 +63,9 @@ final class ModelStore {
     nonisolated static let downloadPatterns = ["*.safetensors", "*.json", "*.jinja"]
 
     private(set) var downloadProgress: [String: Double] = [:]
+    private(set) var downloadErrors: [String: String] = [:]
     private(set) var customModels: [CatalogModel]
+    private(set) var enabledMLXStreamedModelIDs: Set<String> = []
     var lastError: String?
 
 #if DEBUG
@@ -79,8 +81,16 @@ final class ModelStore {
     private var streamedInstallers: [String: StreamedModelInstaller] = [:]
     private var streamedInstallProgressByModelID: [String: StreamedInstallProgress] = [:]
     private var streamedInstallErrors: [String: String] = [:]
-    /// Invalidates filesystem-backed managed-install queries after a Trash move.
-    private var streamedStorageRevision = 0
+    @ObservationIgnored
+    private var nextDownloadToken: UInt64 = 0
+    @ObservationIgnored
+    private var activeDownloadTokens: [String: UInt64] = [:]
+    @ObservationIgnored
+    private var dyingDownloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored
+    private var dyingDownloadTokens: [String: UInt64] = [:]
+    /// Invalidates filesystem-backed managed-install queries after a Trash move or install.
+    private(set) var streamedStorageRevision = 0
     /// Validated `.gturbo` directories chosen by the user. MLX snapshots keep
     /// using the existing `~/Models` layouts and never enter this map.
     private var streamedModelRegistrations: [String: StreamedModelRegistration] = [:]
@@ -92,13 +102,38 @@ final class ModelStore {
     private let availabilityCache = ModelAvailabilityCache()
     private var availabilityRevision = 0
     @ObservationIgnored
-    private var becomeActiveObserver: NSObjectProtocol?
+    private var customModelsByID: [String: CatalogModel] = [:]
     @ObservationIgnored
-    private var becomeActiveDebounceTask: Task<Void, Never>?
+    private var inFlightImportRepoIDs: Set<String> = []
+    @ObservationIgnored
+    private var visionPackPresenceCache: [String: Bool] = [:]
+    @ObservationIgnored
+    private nonisolated(unsafe) var becomeActiveObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var becomeActiveDebounceTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var storageStatsTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var storageStatsRevision: UInt64 = 0
+    @ObservationIgnored
+    var mlxDownloadHandler: (@Sendable (
+        String, String?, URL, @escaping @Sendable (Double) -> Void
+    ) async throws -> Void)?
+    @ObservationIgnored
+    var streamedInstallHandler: (@Sendable (
+        StreamedModelInstaller, StreamedMoEVariant, URL, Bool,
+        @escaping @Sendable (StreamedInstallProgress) -> Void
+    ) async throws -> Void)?
+    @ObservationIgnored
+    var importFetchHandler: (@Sendable (URL) async throws -> (Data, URLResponse))?
+    @ObservationIgnored
+    var isAvailableOverride: ((String) -> Bool)?
     /// Last completed storage-stat snapshot. Refreshed off-main.
     private(set) var usedBytes: Int64 = 0
     private(set) var availableBytes: Int64 = 0
     private(set) var totalBytes: Int64 = 0
+
+    var cachedUnsupportedReasonCount: Int { unsupportedReasonCache.count }
 
     init() {
 #if DEBUG
@@ -148,6 +183,16 @@ final class ModelStore {
         } else {
             customModels = []
         }
+        customModelsByID = Dictionary(
+            customModels.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        if let enabled = UserDefaults.standard.array(forKey: Keys.enabledMLXStreamedModelIDs) as? [String] {
+            enabledMLXStreamedModelIDs = Set(enabled.filter {
+                MLXStreamedInstall.variant(forStreamedModelID: $0) != nil
+            })
+        } else {
+            enabledMLXStreamedModelIDs = []
+        }
         restoreStreamedModelDirectories()
         restoreManagedStreamedModelDirectory()
         try? FileManager.default.createDirectory(at: Self.hubCacheDirectory, withIntermediateDirectories: true)
@@ -155,30 +200,96 @@ final class ModelStore {
         observeApplicationActivation()
     }
 
+    deinit {
+        if let observer = becomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        becomeActiveDebounceTask?.cancel()
+        storageStatsTask?.cancel()
+    }
+
     /// Catalog plus imported entries, in display order.
     var allModels: [CatalogModel] { ModelCatalog.models + customModels }
 
+    /// O(1) lookup across curated catalog and imported models.
+    nonisolated static func lookupModel(
+        id: String,
+        customModelsByID: [String: CatalogModel]
+    ) -> CatalogModel? {
+        ModelCatalog.model(for: id) ?? customModelsByID[id]
+    }
+
     func model(for id: String) -> CatalogModel? {
-        guard let model = allModels.first(where: { $0.id == id }).map({
-            ModelCatalog.applyingKnownCapabilities(to: $0)
-        }) else { return nil }
-        return StreamedMoEInstall.applyingVisionPackPresence(
-            to: model,
-            directory: availableDirectory(for: id))
+        guard let base = Self.lookupModel(id: id, customModelsByID: customModelsByID) else {
+            return nil
+        }
+        let enriched = ModelCatalog.applyingKnownCapabilities(to: base)
+        guard let variant = StreamedMoEInstall.variant(forStreamedModelID: id),
+              variant.architecture == .gemma4,
+              let directory = availableDirectory(for: id)
+        else { return enriched }
+        return cachedVisionPackPresent(beside: directory)
+            ? enriched.withSupportsVision(true)
+            : enriched
+    }
+
+    func gemmaVisionPackMissing(for streamedModelID: String) -> (missing: Bool, isManaged: Bool) {
+        guard let variant = StreamedMoEInstall.variant(forStreamedModelID: streamedModelID),
+              variant.architecture == .gemma4
+        else { return (false, false) }
+        let isManaged: Bool
+        let directory: URL
+        if let registered = availableDirectory(for: streamedModelID) {
+            directory = registered
+            isManaged = registered.standardizedFileURL == variant.managedDirectory.standardizedFileURL
+        } else if managedStreamedInstallState(for: streamedModelID) == .complete {
+            directory = variant.managedDirectory
+            isManaged = true
+        } else {
+            return (false, false)
+        }
+        return (!cachedVisionPackPresent(beside: directory), isManaged)
+    }
+
+    private func cachedVisionPackPresent(beside directory: URL) -> Bool {
+        let key = directory.standardizedFileURL.path
+        if let cached = visionPackPresenceCache[key] {
+            return cached
+        }
+        let present = StreamedMoEInstall.visionCompanionLooksPresent(beside: directory)
+        visionPackPresenceCache[key] = present
+        return present
     }
 
     // MARK: - Local availability
 
     /// `~/Models/<org>/<name>` for a repo id, when the id has the org/name shape.
     nonisolated static func plainDirectory(for id: String) -> URL? {
-        let parts = id.split(separator: "/")
+        let parts = id.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return nil }
+        let org = String(parts[0])
+        let name = String(parts[1])
+        guard !org.isEmpty, !name.isEmpty,
+              org != ".", org != "..",
+              name != ".", name != "..",
+              !org.contains("\0"), !name.contains("\0")
+        else { return nil }
         return modelsRoot
-            .appendingPathComponent(String(parts[0]), isDirectory: true)
-            .appendingPathComponent(String(parts[1]), isDirectory: true)
+            .appendingPathComponent(org, isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
     }
 
     nonisolated static func directoryHasWeights(_ url: URL) -> Bool {
+        directoryHasWeights(url, hasPositiveWeightFile: regularFileHasPositiveSize)
+    }
+
+    /// Verifies that a model directory has `config.json`, no sibling `.partial`,
+    /// and every unique weight shard listed in `model.safetensors.index.json`
+    /// (checked once per distinct shard file, not once per tensor entry).
+    nonisolated static func directoryHasWeights(
+        _ url: URL,
+        hasPositiveWeightFile: (URL) -> Bool
+    ) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.appendingPathComponent("config.json").path) else { return false }
         let siblingPartial = url.deletingLastPathComponent()
@@ -190,22 +301,26 @@ final class ModelStore {
             guard let data = try? Data(contentsOf: indexURL),
                   let index = try? JSONDecoder().decode(SafetensorsWeightIndex.self, from: data)
             else { return false }
-            return index.weightMap.values.allSatisfy { shard in
-                regularFileHasPositiveSize(url.appendingPathComponent(shard))
+            let uniqueShards = Set(index.weightMap.values)
+            guard !uniqueShards.isEmpty else { return false }
+            return uniqueShards.allSatisfy { shard in
+                hasPositiveWeightFile(url.appendingPathComponent(shard))
             }
         }
 
         let contents = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
         return contents.contains { name in
             name.hasSuffix(".safetensors")
-                && regularFileHasPositiveSize(url.appendingPathComponent(name))
+                && hasPositiveWeightFile(url.appendingPathComponent(name))
         }
     }
 
-    private nonisolated static func regularFileHasPositiveSize(_ url: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+    nonisolated static func regularFileHasPositiveSize(_ url: URL) -> Bool {
+        let resolved = url.resolvingSymlinksInPath()
+        guard let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize
+        else { return false }
         return size > 0
     }
 
@@ -230,10 +345,17 @@ final class ModelStore {
         if StreamedMoEInstall.variant(forStreamedModelID: id) != nil {
             return streamedModelRegistrations[id]?.directory
         }
+        if let variant = MLXStreamedInstall.variant(forStreamedModelID: id) {
+            guard enabledMLXStreamedModelIDs.contains(id) else { return nil }
+            return availabilityCache.directory(for: variant.sourceModelID)
+        }
         return availabilityCache.directory(for: id)
     }
 
     func isAvailable(_ id: String) -> Bool {
+        if let isAvailableOverride {
+            return isAvailableOverride(id)
+        }
 #if DEBUG
         if extraSeededAvailableIDs.contains(id) { return true }
         if usesSeededDemoAvailability {
@@ -243,13 +365,52 @@ final class ModelStore {
         return availableDirectory(for: id) != nil
     }
 
+    func isMLXStreamedEnabled(_ id: String) -> Bool {
+        enabledMLXStreamedModelIDs.contains(id)
+    }
+
+    func enableMLXStreamedModel(_ id: String) {
+        guard MLXStreamedInstall.variant(forStreamedModelID: id) != nil else { return }
+        if enabledMLXStreamedModelIDs.insert(id).inserted {
+            persistEnabledMLXStreamedModelIDs()
+        }
+        invalidateModelLookupCaches(for: id)
+    }
+
+    func disableMLXStreamedModel(_ id: String) {
+        if enabledMLXStreamedModelIDs.remove(id) != nil {
+            persistEnabledMLXStreamedModelIDs()
+        }
+        invalidateModelLookupCaches(for: id)
+    }
+
+    func enableAndDownloadMLXStreamedModel(_ id: String) {
+        guard let variant = MLXStreamedInstall.variant(forStreamedModelID: id) else { return }
+        enableMLXStreamedModel(id)
+        if availabilityCache.directory(for: variant.sourceModelID) == nil,
+           downloadTasks[variant.sourceModelID] == nil {
+            download(variant.sourceModelID)
+        }
+    }
+
+    private func persistEnabledMLXStreamedModelIDs() {
+        UserDefaults.standard.set(
+            enabledMLXStreamedModelIDs.sorted(),
+            forKey: Keys.enabledMLXStreamedModelIDs)
+    }
+
     private func invalidateAvailability(for id: String) {
         availabilityCache.invalidate(id)
+        visionPackPresenceCache.removeAll()
         availabilityRevision &+= 1
     }
 
     private func invalidateModelLookupCaches(for id: String) {
         unsupportedReasonCache.removeValue(forKey: id)
+        if let dependent = MLXStreamedInstall.variant(forSourceModelID: id) {
+            unsupportedReasonCache.removeValue(forKey: dependent.modelID)
+            availabilityCache.invalidate(dependent.modelID)
+        }
         invalidateAvailability(for: id)
     }
 
@@ -312,6 +473,9 @@ final class ModelStore {
     /// Why this on-disk model can't run in this build, or nil if it can / isn't local.
     func unsupportedReason(for id: String) -> String? {
         if StreamedMoEInstall.variant(forStreamedModelID: id) != nil { return nil }
+        if let variant = MLXStreamedInstall.variant(forStreamedModelID: id) {
+            return unsupportedReason(for: variant.sourceModelID)
+        }
         // [String: String?] — use updateValue so a nil reason (supported model)
         // is stored; plain assignment of nil would remove the key instead.
         if unsupportedReasonCache.index(forKey: id) != nil {
@@ -350,7 +514,13 @@ final class ModelStore {
 
     // MARK: - Download / cancel / delete
 
-    func isDownloading(_ id: String) -> Bool { downloadProgress[id] != nil }
+    func isDownloading(_ id: String) -> Bool {
+        if let variant = MLXStreamedInstall.variant(forStreamedModelID: id) {
+            return enabledMLXStreamedModelIDs.contains(id)
+                && downloadProgress[variant.sourceModelID] != nil
+        }
+        return downloadProgress[id] != nil
+    }
 
     func streamedInstallProgress(for modelID: String) -> StreamedInstallProgress? {
         streamedInstallProgressByModelID[modelID]
@@ -360,13 +530,35 @@ final class ModelStore {
         streamedInstallErrors[modelID]
     }
 
+    func downloadError(for modelID: String) -> String? {
+        if let variant = MLXStreamedInstall.variant(forStreamedModelID: modelID) {
+            return downloadErrors[variant.sourceModelID]
+        }
+        return streamedInstallErrors[modelID] ?? downloadErrors[modelID]
+    }
+
+    private func issueDownloadToken(for id: String) -> UInt64 {
+        nextDownloadToken &+= 1
+        activeDownloadTokens[id] = nextDownloadToken
+        return nextDownloadToken
+    }
+
+    private func isCurrentDownload(_ id: String, token: UInt64) -> Bool {
+        activeDownloadTokens[id] == token
+    }
+
     func download(_ id: String) {
+        if MLXStreamedInstall.variant(forStreamedModelID: id) != nil {
+            enableAndDownloadMLXStreamedModel(id)
+            return
+        }
         guard downloadTasks[id] == nil else { return }
         if StreamedMoEInstall.variant(forStreamedModelID: id) != nil {
             installStreamedModel(id)
             return
         }
         if let restriction = model(for: id)?.installRestriction {
+            downloadErrors[id] = restriction
             lastError = restriction
             return
         }
@@ -375,35 +567,62 @@ final class ModelStore {
         // and never falls back to the (broken) library `.id` downloader. See
         // `SnapshotDownloader` for why we don't use the vendored `downloadSnapshot`.
         guard let destination = Self.plainDirectory(for: id) else {
-            lastError = "Invalid model id: \(id)"
+            let message = "Invalid model id: \(id)"
+            downloadErrors[id] = message
+            lastError = message
             return
         }
+        downloadErrors[id] = nil
         lastError = nil
         downloadProgress[id] = 0
         let sourceModel = model(for: id)
         let sourceSubfolder = sourceModel?.sourceSubfolder
         let sourceRepoID = sourceModel?.huggingFaceRepoID ?? id
+        let token = issueDownloadToken(for: id)
+        let priorTask = dyingDownloadTasks[id]
+        let customHandler = mlxDownloadHandler
         let task = Task { [weak self] in
+            if let priorTask {
+                await priorTask.value
+            }
             do {
-                try await SnapshotDownloader.download(
-                    repoID: sourceRepoID, subfolder: sourceSubfolder, destination: destination,
-                    onProgress: { fraction in
-                        Task { @MainActor in
-                            self?.downloadProgress[id] = fraction
-                        }
-                    })
+                try Task.checkCancellation()
+                let progressHandler: @Sendable (Double) -> Void = { fraction in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isCurrentDownload(id, token: token) else { return }
+                        self.downloadProgress[id] = fraction
+                    }
+                }
+                if let customHandler {
+                    try await customHandler(sourceRepoID, sourceSubfolder, destination, progressHandler)
+                } else {
+                    try await SnapshotDownloader.download(
+                        repoID: sourceRepoID, subfolder: sourceSubfolder, destination: destination,
+                        onProgress: progressHandler)
+                }
             } catch is CancellationError {
                 // Cancelled: the `.partial` staging dir is left for resume.
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.lastError = "Download failed: \(error.localizedDescription)"
+                    guard let self, self.isCurrentDownload(id, token: token) else { return }
+                    let message = "Download failed: \(error.localizedDescription)"
+                    self.downloadErrors[id] = message
+                    self.lastError = message
                 }
             }
             await MainActor.run { [weak self] in
-                self?.downloadProgress[id] = nil
-                self?.downloadTasks[id] = nil
-                self?.invalidateModelLookupCaches(for: id)
-                self?.refreshStorageStats()
+                guard let self else { return }
+                if self.dyingDownloadTokens[id] == token {
+                    self.dyingDownloadTokens[id] = nil
+                    self.dyingDownloadTasks[id] = nil
+                }
+                if self.isCurrentDownload(id, token: token) {
+                    self.activeDownloadTokens[id] = nil
+                    self.downloadProgress[id] = nil
+                    self.downloadTasks[id] = nil
+                    self.invalidateModelLookupCaches(for: id)
+                    self.refreshStorageStats()
+                }
             }
         }
         downloadTasks[id] = task
@@ -413,32 +632,57 @@ final class ModelStore {
     func downloadAndWait(_ id: String) async throws {
         if isAvailable(id) { return }
         download(id)
-        if let task = downloadTasks[id] { await task.value }
+        let trackedDownloadID = MLXStreamedInstall.variant(forStreamedModelID: id)?.sourceModelID ?? id
+        if let task = downloadTasks[trackedDownloadID] ?? streamedInstallTasks[id] {
+            await task.value
+        }
         guard isAvailable(id) else {
-            throw EngineError.generationFailed(lastError ?? "Download failed.")
+            let message = downloadError(for: id) ?? lastError ?? "Download failed."
+            throw EngineError.generationFailed(message)
         }
     }
 
     func cancelDownload(_ id: String) {
+        let resolvedID = MLXStreamedInstall.variant(forStreamedModelID: id)?.sourceModelID ?? id
+        let token = activeDownloadTokens.removeValue(forKey: resolvedID)
         if StreamedMoEInstall.variant(forStreamedModelID: id) != nil {
-            streamedInstallTasks[id]?.cancel()
-            streamedInstallers[id]?.cancel()
+            if let task = streamedInstallTasks.removeValue(forKey: id) {
+                task.cancel()
+                if let token {
+                    dyingDownloadTasks[id] = task
+                    dyingDownloadTokens[id] = token
+                }
+            }
+            streamedInstallers.removeValue(forKey: id)?.cancel()
             streamedInstallProgressByModelID[id] = nil
         }
-        downloadTasks[id]?.cancel()
-        downloadTasks[id] = nil
-        downloadProgress[id] = nil
+        if let task = downloadTasks.removeValue(forKey: resolvedID) {
+            task.cancel()
+            if let token {
+                dyingDownloadTasks[resolvedID] = task
+                dyingDownloadTokens[resolvedID] = token
+            }
+        }
+        downloadProgress[resolvedID] = nil
     }
 
-    /// Removes an app-owned install or forgets an external registration.
-    /// Managed `.gturbo` artifacts go to macOS Trash so the operation remains
-    /// recoverable; externally selected folders are never modified.
+    /// Removes an app-owned install, forgets an external registration, or
+    /// disables an opt-in MLX streamed entry while keeping shared weights.
     @discardableResult
     func delete(_ id: String) -> String? {
+        if MLXStreamedInstall.variant(forStreamedModelID: id) != nil {
+            disableMLXStreamedModel(id)
+            lastError = nil
+            refreshStorageStats()
+            return nil
+        }
         if let variant = StreamedMoEInstall.variant(forStreamedModelID: id) {
             let message = removeStreamedModel(id, variant: variant)
             refreshStorageStats()
             return message
+        }
+        if downloadTasks[id] != nil {
+            cancelDownload(id)
         }
         var artifacts: [URL] = []
         if let plain = Self.plainDirectory(for: id) {
@@ -458,8 +702,12 @@ final class ModelStore {
                 moveToTrash: { url in
                     try fileManager.trashItem(at: url, resultingItemURL: nil)
                 })
+            if let dependent = MLXStreamedInstall.variant(forSourceModelID: id) {
+                disableMLXStreamedModel(dependent.modelID)
+            }
             invalidateModelLookupCaches(for: id)
             refreshStorageStats()
+            downloadErrors[id] = nil
             lastError = nil
             return nil
         } catch {
@@ -482,7 +730,7 @@ final class ModelStore {
             lastError = nil
             return nil
         case .managed:
-            guard streamedInstallTasks[id] == nil else {
+            guard streamedInstallTasks[id] == nil && dyingDownloadTasks[id] == nil else {
                 return "Wait for the SSD model download to stop, then remove it again."
             }
             let fileManager = FileManager.default
@@ -527,22 +775,78 @@ final class ModelStore {
 
     // MARK: - Import
 
+    nonisolated static func validateImportRepoID(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return nil }
+        let org = String(parts[0])
+        let name = String(parts[1])
+        guard !org.isEmpty, !name.isEmpty,
+              org != ".", org != "..",
+              name != ".", name != ".."
+        else { return nil }
+        let isAllowedASCII: (UnicodeScalar) -> Bool = { scalar in
+            (scalar >= "A" && scalar <= "Z")
+                || (scalar >= "a" && scalar <= "z")
+                || (scalar >= "0" && scalar <= "9")
+                || scalar == "." || scalar == "_" || scalar == "-"
+        }
+        guard org.unicodeScalars.allSatisfy(isAllowedASCII),
+              name.unicodeScalars.allSatisfy(isAllowedASCII),
+              HuggingFace.Repo.ID(rawValue: trimmed) != nil
+        else { return nil }
+        return trimmed
+    }
+
+    nonisolated static func huggingFaceMetadataURL(repoID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        components.path = "/api/models/\(repoID)"
+        return components.url
+    }
+
+    nonisolated static func huggingFaceConfigURL(repoID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        components.path = "/\(repoID)/raw/main/config.json"
+        return components.url
+    }
+
+    func containsModelCaseInsensitive(_ id: String) -> Bool {
+        let needle = id.lowercased()
+        return allModels.contains { $0.id.lowercased() == needle }
+    }
+
     /// Returns an error message, or nil on success (download started).
     func importModel(repoID: String) async -> String? {
-        let trimmed = repoID.trimmingCharacters(in: .whitespaces)
-        let pattern = /^[\w.\-]+\/[\w.\-]+$/
-        guard trimmed.wholeMatch(of: pattern) != nil, HuggingFace.Repo.ID(rawValue: trimmed) != nil else {
+        guard let trimmed = Self.validateImportRepoID(repoID) else {
             return "Enter a repo id like ModelAuthor/ModelName-MLX."
         }
-        guard allModels.first(where: { $0.id == trimmed }) == nil else {
+        let key = trimmed.lowercased()
+        guard !containsModelCaseInsensitive(trimmed), !inFlightImportRepoIDs.contains(key) else {
             return "This model is already in the list."
         }
+        guard let metadataURL = Self.huggingFaceMetadataURL(repoID: trimmed),
+              let configURL = Self.huggingFaceConfigURL(repoID: trimmed) else {
+            return "Enter a repo id like ModelAuthor/ModelName-MLX."
+        }
+        inFlightImportRepoIDs.insert(key)
+        defer { inFlightImportRepoIDs.remove(key) }
+
+        let fetcher = importFetchHandler ?? { url in
+            try await URLSession.shared.data(from: url)
+        }
         do {
-            let url = URL(string: "https://huggingface.co/api/models/\(trimmed)")!
-            let (_, response) = try await URLSession.shared.data(from: url)
+            let (_, response) = try await fetcher(metadataURL)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 return "Repository not found on Hugging Face."
             }
+        } catch is CancellationError {
+            return nil
+        } catch let error as URLError where error.code == .cancelled {
+            return nil
         } catch {
             return "Could not reach Hugging Face: \(error.localizedDescription)"
         }
@@ -553,8 +857,7 @@ final class ModelStore {
         let supportsVision: Bool
         let configJSON: Data
         do {
-            let url = URL(string: "https://huggingface.co/\(trimmed)/raw/main/config.json")!
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await fetcher(configURL)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 return "Repository has no readable config.json — it doesn't look like an MLX model."
             }
@@ -563,21 +866,45 @@ final class ModelStore {
             }
             supportsVision = ModelSupport.visionCapable(configJSON: data)
             configJSON = data
+        } catch is CancellationError {
+            return nil
+        } catch let error as URLError where error.code == .cancelled {
+            return nil
         } catch {
             return "Could not verify the model config: \(error.localizedDescription)"
         }
-        customModels.append(
-            ModelCatalog.importedModel(
-                repoID: trimmed, supportsVision: supportsVision, configJSON: configJSON))
+        guard !Task.isCancelled else { return nil }
+        guard !containsModelCaseInsensitive(trimmed) else {
+            return "This model is already in the list."
+        }
+        let imported = ModelCatalog.importedModel(
+            repoID: trimmed, supportsVision: supportsVision, configJSON: configJSON)
+        customModels.append(imported)
+        customModelsByID[imported.id] = imported
         persistCustomModels()
         download(trimmed)
         return nil
     }
 
-    func removeImported(_ id: String) {
-        delete(id)
+    @discardableResult
+    func removeImported(_ id: String) -> String? {
+        removeImported(id) { self.delete($0) }
+    }
+
+    @discardableResult
+    func removeImported(_ id: String, deleteAction: (String) -> String?) -> String? {
+        if let error = deleteAction(id) {
+            return error
+        }
         customModels.removeAll { $0.id == id }
+        customModelsByID.removeValue(forKey: id)
         persistCustomModels()
+        return nil
+    }
+
+    func registerCustomModelForTesting(_ model: CatalogModel) {
+        customModels.append(model)
+        customModelsByID[model.id] = model
     }
 
     private func persistCustomModels() {
@@ -630,21 +957,36 @@ final class ModelStore {
         let outputDirectory = variant.managedDirectory
         let installer = StreamedModelInstaller()
         streamedInstallers[modelID] = installer
+        let token = issueDownloadToken(for: modelID)
+        let priorTask = dyingDownloadTasks[modelID]
+        let customHandler = streamedInstallHandler
         let task = Task { [weak self] in
             guard let self else { return }
+            if let priorTask {
+                await priorTask.value
+            }
             do {
-                try await installer.install(
-                    variant: variant,
-                    at: outputDirectory,
-                    companionOnly: companionOnly) { [weak self] progress in
+                try Task.checkCancellation()
+                let progressHandler: @Sendable (StreamedInstallProgress) -> Void = { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        self?.streamedInstallProgressByModelID[modelID] = progress
-                        self?.downloadProgress[modelID] = progress.fraction ?? 0.01
+                        guard let self, self.isCurrentDownload(modelID, token: token) else { return }
+                        self.streamedInstallProgressByModelID[modelID] = progress
+                        self.downloadProgress[modelID] = progress.fraction ?? 0.01
                     }
+                }
+                if let customHandler {
+                    try await customHandler(
+                        installer, variant, outputDirectory, companionOnly, progressHandler)
+                } else {
+                    try await installer.install(
+                        variant: variant,
+                        at: outputDirectory,
+                        companionOnly: companionOnly,
+                        onProgress: progressHandler)
                 }
                 try Task.checkCancellation()
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.isCurrentDownload(modelID, token: token) else { return }
                     if let error = registerManagedStreamedModelDirectory(
                         outputDirectory,
                         variant: variant,
@@ -666,15 +1008,26 @@ final class ModelStore {
                 // The helper keeps its verified checkpoint so the next click resumes.
             } catch {
                 await MainActor.run { [weak self] in
+                    guard let self, self.isCurrentDownload(modelID, token: token) else { return }
                     let message = error.localizedDescription
-                    self?.streamedInstallErrors[modelID] = message
-                    self?.lastError = message
+                    self.streamedInstallErrors[modelID] = message
+                    self.lastError = message
                 }
             }
             await MainActor.run { [weak self] in
-                self?.downloadProgress[modelID] = nil
-                self?.streamedInstallTasks[modelID] = nil
-                self?.streamedInstallers[modelID] = nil
+                guard let self else { return }
+                if self.dyingDownloadTokens[modelID] == token {
+                    self.dyingDownloadTokens[modelID] = nil
+                    self.dyingDownloadTasks[modelID] = nil
+                }
+                if self.isCurrentDownload(modelID, token: token) {
+                    self.activeDownloadTokens[modelID] = nil
+                    self.downloadProgress[modelID] = nil
+                    self.streamedInstallTasks[modelID] = nil
+                    self.streamedInstallers[modelID] = nil
+                }
+                self.streamedStorageRevision &+= 1
+                self.refreshStorageStats()
             }
         }
         streamedInstallTasks[modelID] = task
@@ -693,7 +1046,9 @@ final class ModelStore {
         }
         streamedModelRegistrations[variant.modelID] = StreamedModelRegistration(
             directory: normalized,
-            closesSecurityScope: false)
+            securityScopedURL: nil)
+        // Clear any stale external bookmark so it cannot shadow the managed install on next launch.
+        Self.dropPersistedStreamedModelBookmark(variant.modelID)
         setManagedStreamedModelEnabled(true, for: variant)
         streamedInstallProgressByModelID[variant.modelID] = StreamedInstallProgress(
             phase: .ready,
@@ -701,6 +1056,7 @@ final class ModelStore {
             downloadedBytes: variant.approximateDownloadBytes,
             totalBytes: variant.approximateDownloadBytes)
         streamedInstallErrors[variant.modelID] = nil
+        downloadErrors[variant.modelID] = nil
         invalidateModelLookupCaches(for: variant.modelID)
         return nil
     }
@@ -718,31 +1074,32 @@ final class ModelStore {
                 normalized,
                 variant: variant)
         }
-        let openedSecurityScope = normalized.startAccessingSecurityScopedResource()
+        let openedSecurityScope = directory.startAccessingSecurityScopedResource()
         if let error = StreamedMoEInstall.validationError(
             at: normalized,
             for: variant) {
-            if openedSecurityScope { normalized.stopAccessingSecurityScopedResource() }
+            if openedSecurityScope { directory.stopAccessingSecurityScopedResource() }
             return error
         }
 
         do {
-            let bookmark = try normalized.bookmarkData(
+            let bookmark = try directory.bookmarkData(
                 options: [.withSecurityScope],
                 includingResourceValuesForKeys: nil,
                 relativeTo: nil)
             streamedModelRegistrations[modelID] = StreamedModelRegistration(
                 directory: normalized,
-                closesSecurityScope: openedSecurityScope)
+                securityScopedURL: openedSecurityScope ? directory : nil)
             var bookmarks = Self.persistedStreamedModelBookmarks()
             bookmarks[modelID] = bookmark
             Self.persistStreamedModelBookmarks(bookmarks)
             invalidateModelLookupCaches(for: modelID)
             lastError = nil
             streamedInstallErrors[modelID] = nil
+            downloadErrors[modelID] = nil
             return nil
         } catch {
-            if openedSecurityScope { normalized.stopAccessingSecurityScopedResource() }
+            if openedSecurityScope { directory.stopAccessingSecurityScopedResource() }
             return "Could not save access to this model directory: \(error.localizedDescription)"
         }
     }
@@ -778,11 +1135,12 @@ final class ModelStore {
                 at: directory,
                 for: variant) == nil else {
                 if openedSecurityScope { directory.stopAccessingSecurityScopedResource() }
+                Self.dropPersistedStreamedModelBookmark(id)
                 continue
             }
             streamedModelRegistrations[id] = StreamedModelRegistration(
                 directory: directory,
-                closesSecurityScope: openedSecurityScope)
+                securityScopedURL: openedSecurityScope ? directory : nil)
         }
     }
 
@@ -797,7 +1155,7 @@ final class ModelStore {
                     for: variant) == nil else { continue }
             streamedModelRegistrations[variant.modelID] = StreamedModelRegistration(
                 directory: variant.managedDirectory,
-                closesSecurityScope: false)
+                securityScopedURL: nil)
             setManagedStreamedModelEnabled(true, for: variant)
         }
     }
@@ -893,7 +1251,10 @@ final class ModelStore {
     /// while the app was in the background. No filesystem watcher.
     func noteExternalModelDirectoryMayHaveChanged() {
         availabilityCache.invalidateAll()
+        visionPackPresenceCache.removeAll()
+        unsupportedReasonCache.removeAll()
         availabilityRevision &+= 1
+        streamedStorageRevision &+= 1
         refreshStorageStats()
     }
 
@@ -921,13 +1282,25 @@ final class ModelStore {
     // MARK: - Storage stats
 
     func refreshStorageStats() {
-        Task {
-            let (used, available, total) = await Task.detached(priority: .utility) {
+        refreshStorageStats {
+            await Task.detached(priority: .utility) {
                 (Self.diskUsageBytes(), Self.availableBytes(), Self.volumeCapacityBytes())
             }.value
-            usedBytes = used
-            availableBytes = available
-            totalBytes = total
+        }
+    }
+
+    func refreshStorageStats(
+        compute: @escaping @Sendable () async -> (used: Int64, available: Int64, total: Int64)
+    ) {
+        storageStatsTask?.cancel()
+        storageStatsRevision &+= 1
+        let revision = storageStatsRevision
+        storageStatsTask = Task { [weak self] in
+            let stats = await compute()
+            guard let self, !Task.isCancelled, self.storageStatsRevision == revision else { return }
+            self.usedBytes = stats.used
+            self.availableBytes = stats.available
+            self.totalBytes = stats.total
         }
     }
 

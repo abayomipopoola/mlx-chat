@@ -15,7 +15,14 @@ struct ComposerView: View {
     @Environment(HeaderDropdown.self) private var dropdown
     @Binding var draft: String
     @FocusState.Binding var focused: Bool
+    var conversationID: UUID? = nil
     let onSend: (String, ComposerAttachments) -> Void
+
+    static func measuringDraftText(for draft: String) -> String {
+        if draft.isEmpty { return " " }
+        if draft.hasSuffix("\n") { return draft + "\u{200B}" }
+        return draft
+    }
 
     @State private var pendingImageData: Data?
     @State private var pendingImagePreview: NSImage?
@@ -64,6 +71,7 @@ struct ComposerView: View {
             VStack(alignment: .leading, spacing: 0) {
                 if hasPendingAttachment {
                     PendingAttachmentStrip(
+                        hasPendingImage: pendingImageData != nil,
                         pendingImagePreview: pendingImagePreview,
                         pendingFileName: pendingFileName,
                         onClearImage: clearPendingImage,
@@ -129,10 +137,13 @@ struct ComposerView: View {
             }
             // UI-verification hook: force ErrorBannerRow to render.
             if ProcessInfo.processInfo.arguments.contains("--seed-error-banner") {
-                chat.errorBanner = "Seeded test banner: model failed to load."
+                chat.setErrorBanner("Seeded test banner: model failed to load.")
             }
         }
         .onChange(of: chat.selectedModelID) {
+            clearPending()
+        }
+        .onChange(of: conversationID) {
             clearPending()
         }
         .onDisappear {
@@ -195,7 +206,7 @@ struct ComposerView: View {
         case .cancelled:
             return
         case .loadFailed:
-            chat.errorBanner = "Couldn't load that image."
+            chat.setErrorBanner("Couldn't load that image.")
         case .picked(let data, let preview):
             pendingImageData = data
             pendingImagePreview = preview
@@ -207,7 +218,7 @@ struct ComposerView: View {
         case .cancelled:
             return
         case .failed(let message):
-            chat.errorBanner = message
+            chat.setErrorBanner(message)
         case .picked(let name, let text):
             pendingFileName = name
             pendingFileText = text
@@ -323,7 +334,11 @@ private struct ComposerDraftField: View {
                 .accessibilityIdentifier("composerField")
                 .accessibilityLabel("What can I help you with?")
                 .onKeyPress(.return, phases: .down) { press in
-                    if press.modifiers.contains(.shift) {
+                    if press.modifiers.contains(.shift) || press.modifiers.contains(.option) {
+                        return .ignored
+                    }
+                    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+                       editor.hasMarkedText() {
                         return .ignored
                     }
                     // Return while loading keeps the draft; Send waits.
@@ -331,7 +346,7 @@ private struct ComposerDraftField: View {
                     return .handled
                 }
                 .background(alignment: .top) {
-                    Text(draft.isEmpty ? " " : draft)
+                    Text(ComposerView.measuringDraftText(for: draft))
                         .font(Studio.composerText)
                         .padding(.horizontal, 5)
                         .frame(maxWidth: .infinity, alignment: .leading)

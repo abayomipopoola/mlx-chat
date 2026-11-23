@@ -7,18 +7,31 @@ struct ModelRow: View {
     let model: CatalogModel
     let onDelete: () -> Void
     let onDownload: (() -> Void)?
+    let onAddStreamed: (() -> Void)?
     let onSetupStreamed: (() -> Void)?
 
     init(
         model: CatalogModel,
         onDelete: @escaping () -> Void,
         onDownload: (() -> Void)? = nil,
+        onAddStreamed: (() -> Void)? = nil,
         onSetupStreamed: (() -> Void)? = nil
     ) {
         self.model = model
         self.onDelete = onDelete
         self.onDownload = onDownload
+        self.onAddStreamed = onAddStreamed
         self.onSetupStreamed = onSetupStreamed
+    }
+
+    static func showsAddStreamedVersionButton(
+        sourceModelID: String,
+        isStreamedAvailable: Bool,
+        isStreamedDownloading: Bool
+    ) -> Bool {
+        let supported = StreamedMoEInstall.supportsSSDStreaming(sourceModelID: sourceModelID)
+            || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: sourceModelID)
+        return supported && !isStreamedAvailable && !isStreamedDownloading
     }
 
     private var store: ModelStore { chat.modelStore }
@@ -29,14 +42,30 @@ struct ModelRow: View {
         let isAvailable = store.isAvailable(model.id)
         let reason = model.installRestriction
             ?? (isAvailable ? store.unsupportedReason(for: model.id) : nil)
-        let progress = store.downloadProgress[model.id]
+        let downloadError = store.downloadError(for: model.id)
+        let progress: Double? = {
+            if let direct = store.downloadProgress[model.id] { return direct }
+            if let variant = MLXStreamedInstall.variant(forStreamedModelID: model.id),
+               store.isMLXStreamedEnabled(model.id) {
+                return store.downloadProgress[variant.sourceModelID]
+            }
+            return nil
+        }()
         let streamedRemovalKind = model.backend == .streamedMoE
             ? store.streamedModelRemovalKind(for: model.id)
             : nil
+        let streamedVariantID = StreamedMoEInstall.variant(forSourceModelID: model.id)?.modelID
+            ?? MLXStreamedInstall.variant(forSourceModelID: model.id)?.modelID
+        let canAddStreamed = streamedVariantID.map { variantID in
+            Self.showsAddStreamedVersionButton(
+                sourceModelID: model.id,
+                isStreamedAvailable: store.isAvailable(variantID),
+                isStreamedDownloading: store.isDownloading(variantID))
+        } ?? false
 
         HStack(spacing: 12) {
             TintedCircleIcon(
-                systemName: model.backend == .streamedMoE
+                systemName: model.backend.isSSDStreamed
                     ? "externaldrive.fill"
                     : model.category == .coding
                     ? "chevron.left.forwardslash.chevron.right"
@@ -63,6 +92,12 @@ struct ModelRow: View {
                         .foregroundStyle(Color.iconOrange)
                         .lineLimit(2)
                 }
+                if let downloadError, downloadError != reason {
+                    Text(downloadError)
+                        .font(Studio.sans(10))
+                        .foregroundStyle(Color.iconOrange)
+                        .lineLimit(2)
+                }
                 Link(destination: model.backend == .streamedMoE
                     ? URL(string: "https://github.com/drumih/turbo-fieldfare#command-line-interface")!
                     : model.hugginFaceURL) {
@@ -83,6 +118,7 @@ struct ModelRow: View {
                 streamedRemovalKind: streamedRemovalKind,
                 onDelete: onDelete,
                 onDownload: onDownload,
+                onAddStreamed: canAddStreamed ? (onAddStreamed ?? onDownload) : nil,
                 onSetupStreamed: onSetupStreamed)
         }
         .padding(14)
@@ -108,6 +144,7 @@ private struct ModelAvailabilityControl: View {
     let streamedRemovalKind: StreamedModelRemovalKind?
     let onDelete: () -> Void
     let onDownload: (() -> Void)?
+    let onAddStreamed: (() -> Void)?
     let onSetupStreamed: (() -> Void)?
 
     private var store: ModelStore { chat.modelStore }
@@ -151,9 +188,8 @@ private struct ModelAvailabilityControl: View {
                         .font(.title2)
                         .foregroundStyle(Color.brandGreen)
                 }
-                if let onDownload,
-                   StreamedMoEInstall.supportsSSDStreaming(sourceModelID: modelID) {
-                    Button(action: onDownload) {
+                if let onAddStreamed {
+                    Button(action: onAddStreamed) {
                         Image(systemName: "externaldrive.badge.plus")
                     }
                     .buttonStyle(.plain)
@@ -163,7 +199,7 @@ private struct ModelAvailabilityControl: View {
                         "Add SSD-streamed version of \(model.displayName)")
                     .accessibilityIdentifier("downloadModel.\(modelID)")
                 }
-                if model.backend == .streamedMoE, let onSetupStreamed {
+                if model.backend.isSSDStreamed, let onSetupStreamed {
                     Button(action: onSetupStreamed) {
                         Image(systemName: "slider.horizontal.3")
                     }
@@ -174,7 +210,7 @@ private struct ModelAvailabilityControl: View {
                         "Manage streamed install for \(model.displayName)")
                 }
                 Button(role: .destructive, action: onDelete) {
-                    Image(systemName: streamedRemovalKind == .external
+                    Image(systemName: (streamedRemovalKind == .external || model.backend == .mlxStreamed)
                         ? "xmark.circle" : "trash")
                 }
                 .buttonStyle(.plain)
@@ -221,6 +257,7 @@ private struct ModelAvailabilityControl: View {
     }
 
     private var removalHelp: String {
+        if model.backend == .mlxStreamed { return "Disable SSD-streamed mode" }
         switch streamedRemovalKind {
         case .managed: return "Move managed install to Trash"
         case .external: return "Forget external install"
@@ -229,6 +266,7 @@ private struct ModelAvailabilityControl: View {
     }
 
     private var removalAccessibilityLabel: String {
+        if model.backend == .mlxStreamed { return "Disable SSD-streamed mode for \(model.displayName)" }
         switch streamedRemovalKind {
         case .managed: return "Move \(model.displayName) to Trash"
         case .external: return "Forget external install for \(model.displayName)"

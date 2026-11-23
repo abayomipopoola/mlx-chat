@@ -88,9 +88,9 @@ import TurboFieldfare
         let base = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
         let lm = try await LLMTypeRegistry.shared.createModel(
             configuration: configData, modelType: base.modelType)
-        try loadWeights(modelDirectory: mlxDirectory, model: lm,
-                        perLayerQuantization: base.perLayerQuantization)
-        let cache = lm.newCache(parameters: nil)
+        try await loadWeights(modelDirectory: mlxDirectory, model: lm,
+                              perLayerQuantization: base.perLayerQuantization)
+        let cache = try lm.newCache(parameters: nil)
         func lastLogits(_ tokens: [Int32]) -> [Float] {
             let input = LMInput.Text(tokens: MLXArray(tokens).reshaped(1, tokens.count))
             let logits: MLXArray = lm(input, cache: cache, state: nil).logits

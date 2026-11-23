@@ -7,11 +7,16 @@ enum GTurboLayoutValidator {
               let layers = root["layers"] as? [[String: Any]] else {
             throw RepackError.configurationInvalid(detail: "layout.json validation failed: malformed root")
         }
+        var seenLayers = Set<Int>()
         for layerObj in layers {
             guard let layerIndex = layerObj["layer"] as? Int,
                   let experts = layerObj["experts"] as? [[String: Any]],
                   let planLayer = plan.layers.first(where: { $0.layerIndex == layerIndex }) else {
                 throw RepackError.configurationInvalid(detail: "layout.json validation failed: malformed layer")
+            }
+            guard seenLayers.insert(layerIndex).inserted else {
+                throw RepackError.configurationInvalid(
+                    detail: "layout.json validation failed: duplicate layer \(layerIndex)")
             }
             if planLayer.expertsPerLayer == 0 { continue }
             var seenLogical = Set<Int>()
@@ -49,6 +54,11 @@ enum GTurboLayoutValidator {
                 throw RepackError.configurationInvalid(detail:
                     "layout.json validation failed: missing experts in layer \(layerIndex)")
             }
+        }
+        let expectedLayers = Set(plan.layers.map(\.layerIndex))
+        guard seenLayers == expectedLayers else {
+            throw RepackError.configurationInvalid(detail:
+                "layout.json validation failed: expected \(expectedLayers.count) layers, found \(seenLayers.count)")
         }
     }
 }

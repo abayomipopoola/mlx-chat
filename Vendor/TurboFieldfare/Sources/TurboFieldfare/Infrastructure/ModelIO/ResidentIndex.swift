@@ -187,16 +187,30 @@ enum ResidentIndexReader {
         return try parseLegacyEntries(indexBuf: indexBuf, header: header, regionLen: regionLen)
     }
 
-    private static func parseLegacyEntries(
+    internal static func parseLegacyEntries(
         indexBuf: [UInt8],
         header: ResidentIndexHeader,
         regionLen: Int
     ) throws -> ResidentIndex {
+        guard regionLen >= headerBytes, regionLen <= indexBuf.count else {
+            throw ModelError.indexCorrupt(
+                detail: "legacy resident index regionLen \(regionLen) out of bounds (\(indexBuf.count))")
+        }
+        guard let entryCount = Int(exactly: header.entryCount) else {
+            throw ModelError.indexCorrupt(
+                detail: "legacy resident index entryCount \(header.entryCount) overflows Int")
+        }
+        let (entriesBytes, mulOverflow) = entryCount.multipliedReportingOverflow(by: entryBytes)
+        let (tableEnd, addOverflow) = headerBytes.addingReportingOverflow(entriesBytes)
+        guard !mulOverflow, !addOverflow, tableEnd <= regionLen else {
+            throw ModelError.indexCorrupt(
+                detail: "legacy resident index entry table overflows region (\(header.entryCount) entries, regionLen=\(regionLen))")
+        }
         var entries: [String: ResidentIndexEntry] = [:]
-        entries.reserveCapacity(Int(header.entryCount))
+        entries.reserveCapacity(entryCount)
         try indexBuf.withUnsafeBytes { raw in
-            let base = raw.baseAddress!
-            for i in 0..<Int(header.entryCount) {
+            guard let base = raw.baseAddress else { return }
+            for i in 0..<entryCount {
                 let p = base.advanced(by: headerBytes + i * entryBytes)
                 let nameOffset = Int(decodeU32LE(p, 0))
                 let nameLength = Int(decodeU16LE(p, 4))

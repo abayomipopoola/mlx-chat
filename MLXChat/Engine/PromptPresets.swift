@@ -86,7 +86,6 @@ enum PromptPresets {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: Keys.promptPreset)
-            UserDefaults.standard.synchronize()
         }
     }
 
@@ -105,7 +104,6 @@ enum PromptPresets {
         } else {
             UserDefaults.standard.set(text, forKey: overrideKey(for: preset))
         }
-        UserDefaults.standard.synchronize()
     }
 
     static func effectiveText(for preset: PromptPreset) -> String {

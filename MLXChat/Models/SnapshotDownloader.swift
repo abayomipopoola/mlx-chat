@@ -45,12 +45,9 @@ enum SnapshotDownloader {
     /// `Link: rel="next"` until that relation is absent. The `size` field carries
     /// the resolved LFS size, so it doubles as the progress weight.
     static func listFiles(repoID: String, subfolder: String? = nil) async throws -> [RemoteFile] {
-        guard var components = URLComponents(
-            string: "https://huggingface.co/api/models/\(repoID)/tree/main") else {
+        guard let start = treeListURL(repoID: repoID) else {
             throw DownloadError.listFailed("bad repository id")
         }
-        components.queryItems = [URLQueryItem(name: "recursive", value: "true")]
-        guard let start = components.url else { throw DownloadError.listFailed("bad repository id") }
 
         var collected: [RemoteFile] = []
         var seen = Set<URL>()
@@ -124,7 +121,7 @@ enum SnapshotDownloader {
     /// True when the file's SHA-256 hex digest equals `expected` (optional `sha256:` prefix ignored).
     static func fileSHA256(_ url: URL, matches expected: String) -> Bool {
         guard let want = normalizedSHA256(expected),
-              let actual = sha256Hex(ofFileAt: url)
+              let actual = try? sha256Hex(ofFileAt: url)
         else { return false }
         return actual.caseInsensitiveCompare(want) == .orderedSame
     }
@@ -136,6 +133,37 @@ enum SnapshotDownloader {
         else { return false }
         guard let sha256 else { return true }
         return fileSHA256(url, matches: sha256)
+    }
+
+    /// Verifies a freshly downloaded temporary file against the repository's
+    /// expected byte count and SHA-256 digest before moving it into staging.
+    static func verifyDownloadedFile(
+        at url: URL,
+        expectedSize: Int64,
+        expectedSHA256: String?,
+        remotePath: String
+    ) throws {
+        if expectedSize > 0 {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let actualSize = (attrs[.size] as? NSNumber)?.int64Value
+            else {
+                throw DownloadError.fileFailed(
+                    path: remotePath,
+                    detail: "couldn't read downloaded file size")
+            }
+            guard actualSize == expectedSize else {
+                throw DownloadError.fileFailed(
+                    path: remotePath,
+                    detail: "size mismatch (got \(actualSize) bytes, expected \(expectedSize))")
+            }
+        }
+        if let expectedSHA256 {
+            guard fileSHA256(url, matches: expectedSHA256) else {
+                throw DownloadError.fileFailed(
+                    path: remotePath,
+                    detail: "SHA-256 checksum mismatch")
+            }
+        }
     }
 
     private static func remoteFiles(fromTreeJSON data: Data, subfolder: String?) throws -> [RemoteFile] {
@@ -170,13 +198,34 @@ enum SnapshotDownloader {
         return value.isEmpty ? nil : value
     }
 
-    private static func sha256Hex(ofFileAt url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    static func treeListURL(repoID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        components.path = "/api/models/\(repoID)/tree/main"
+        components.queryItems = [URLQueryItem(name: "recursive", value: "true")]
+        return components.url
+    }
+
+    static func resolveFileURL(repoID: String, remotePath: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        components.path = "/\(repoID)/resolve/main/\(remotePath)"
+        return components.url
+    }
+
+    static func sha256Hex(ofFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        return try sha256Hex {
+            try handle.read(upToCount: 1024 * 1024)
+        }
+    }
+
+    static func sha256Hex(readChunk: () throws -> Data?) throws -> String {
         var hasher = SHA256()
-        while true {
-            let chunk = (try? handle.read(upToCount: 1024 * 1024)) ?? Data()
-            if chunk.isEmpty { break }
+        while let chunk = try readChunk(), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -199,9 +248,45 @@ enum SnapshotDownloader {
         } else {
             localPath = remotePath
         }
-        guard !localPath.isEmpty else { return nil }
-        if localPath.hasSuffix(".safetensors"), localPath.contains("/") { return nil }
+        guard !localPath.isEmpty,
+              !localPath.hasPrefix("/"),
+              !localPath.contains("\0")
+        else { return nil }
+        let segments = localPath.split(separator: "/", omittingEmptySubsequences: false)
+        if segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) {
+            return nil
+        }
+        if localPath.hasSuffix(".safetensors") {
+            if localPath.contains("/") || localPath == "mtp.safetensors" { return nil }
+        }
         return localPath
+    }
+
+    static func safeStagedFileURL(staging: URL, localPath: String) -> URL? {
+        guard !localPath.isEmpty,
+              !localPath.hasPrefix("/"),
+              !localPath.contains("\0")
+        else { return nil }
+        let segments = localPath.split(separator: "/", omittingEmptySubsequences: false)
+        if segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) {
+            return nil
+        }
+        let base = staging.standardizedFileURL
+        let resolved = base.appendingPathComponent(localPath).standardizedFileURL
+        let prefix = base.path.hasSuffix("/") ? base.path : base.path + "/"
+        guard resolved.path.hasPrefix(prefix) else { return nil }
+        return resolved
+    }
+
+    static func publishStagedDirectory(staging: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: destination)
+        }
     }
 
     /// Downloads all wanted files into `destination` (a plain `~/Models/<org>/<name>`
@@ -232,7 +317,9 @@ enum SnapshotDownloader {
         var completedBytes: Int64 = 0
         for file in files {
             try Task.checkCancellation()
-            let fileURL = staging.appendingPathComponent(file.localPath)
+            guard let fileURL = safeStagedFileURL(staging: staging, localPath: file.localPath) else {
+                throw DownloadError.fileFailed(path: file.remotePath, detail: "unsafe file path")
+            }
 
             // Resume across restarts / re-clicks: reuse only when size (and sha, if known) match.
             if canReuseStagedFile(at: fileURL, size: file.size, sha256: file.sha256) {
@@ -241,13 +328,19 @@ enum SnapshotDownloader {
                 continue
             }
 
-            guard let src = URL(
-                string: "https://huggingface.co/\(repoID)/resolve/main/\(file.remotePath)") else {
+            guard let src = resolveFileURL(repoID: repoID, remotePath: file.remotePath) else {
                 throw DownloadError.fileFailed(path: file.remotePath, detail: "bad file url")
             }
             let base = completedBytes
             let fileSize = file.size
-            try await downloadFile(from: src, to: fileURL, session: session) { fraction in
+            try await downloadFile(
+                from: src,
+                to: fileURL,
+                expectedSize: file.size,
+                expectedSHA256: file.sha256,
+                remotePath: file.remotePath,
+                session: session
+            ) { fraction in
                 let aggregate = Double(base) + fraction * Double(fileSize)
                 onProgress(aggregate / Double(totalBytes))
             }
@@ -256,10 +349,25 @@ enum SnapshotDownloader {
         }
 
         // Publish atomically: the plain directory appears only when fully staged.
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: staging, to: destination)
+        try publishStagedDirectory(staging: staging, to: destination)
+    }
+
+    static func mapDownloadFailure(
+        _ error: Error,
+        filename: String,
+        isCancelled: Bool
+    ) -> Error {
+        if isCancelled || Task.isCancelled {
+            return CancellationError()
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return CancellationError()
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            return CancellationError()
+        }
+        return DownloadError.fileFailed(path: filename, detail: error.localizedDescription)
     }
 
     /// Downloads one file with the classic completion-handler task (which follows the
@@ -267,6 +375,9 @@ enum SnapshotDownloader {
     private static func downloadFile(
         from url: URL,
         to destination: URL,
+        expectedSize: Int64,
+        expectedSHA256: String?,
+        remotePath: String,
         session: URLSession,
         onFraction: @escaping @Sendable (Double) -> Void
     ) async throws {
@@ -278,10 +389,14 @@ enum SnapshotDownloader {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let filename = url.lastPathComponent
                 let task = session.downloadTask(with: url) { tempURL, response, error in
-                    box.poller?.cancel()
+                    box.stopPoller()
                     if let error {
-                        continuation.resume(throwing: DownloadError.fileFailed(
-                            path: filename, detail: error.localizedDescription))
+                        continuation.resume(throwing: mapDownloadFailure(
+                            error, filename: filename, isCancelled: box.isCancelled))
+                        return
+                    }
+                    if box.isCancelled || Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
                         return
                     }
                     let status = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -295,34 +410,95 @@ enum SnapshotDownloader {
                             path: filename, detail: "no downloaded file"))
                         return
                     }
-                    // Must move synchronously: URLSession deletes tempURL after this returns.
+                    // Verify on URLSession's temp file before moving into staging:
+                    // on mismatch, throwing leaves staging untouched and URLSession
+                    // cleans up tempURL automatically.
                     do {
-                        try? FileManager.default.removeItem(at: destination)
-                        try FileManager.default.moveItem(at: tempURL, to: destination)
+                        try verifyDownloadedFile(
+                            at: tempURL,
+                            expectedSize: expectedSize,
+                            expectedSHA256: expectedSHA256,
+                            remotePath: remotePath)
+                        if FileManager.default.fileExists(atPath: destination.path) {
+                            _ = try FileManager.default.replaceItemAt(destination, withItemAt: tempURL)
+                        } else {
+                            try FileManager.default.moveItem(at: tempURL, to: destination)
+                        }
                         continuation.resume()
+                    } catch let error as DownloadError {
+                        continuation.resume(throwing: error)
                     } catch {
                         continuation.resume(throwing: DownloadError.fileFailed(
                             path: filename, detail: error.localizedDescription))
                     }
                 }
-                box.task = task
-                box.poller = Task {
-                    while !Task.isCancelled {
-                        onFraction(task.progress.fractionCompleted)
-                        try? await Task.sleep(nanoseconds: 200_000_000)
-                    }
+                let started = box.start(
+                    task: task,
+                    makePoller: {
+                        Task {
+                            while !Task.isCancelled {
+                                onFraction(task.progress.fractionCompleted)
+                                try? await Task.sleep(nanoseconds: 200_000_000)
+                            }
+                        }
+                    },
+                    resume: { task.resume() })
+                if !started {
+                    continuation.resume(throwing: CancellationError())
                 }
-                task.resume()
             }
         } onCancel: {
-            box.task?.cancel()
-            box.poller?.cancel()
+            box.cancel()
         }
     }
 
-    /// Holds the in-flight task + progress poller so cancellation can reach them.
-    private final class TaskBox: @unchecked Sendable {
-        var task: URLSessionDownloadTask?
-        var poller: Task<Void, Never>?
+    /// Holds the in-flight task + progress poller under a lock so cancellation
+    /// racing with task startup never calls `resume()` after cancel.
+    final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionDownloadTask?
+        private var poller: Task<Void, Never>?
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.withLock { cancelled }
+        }
+
+        func start(
+            task: URLSessionDownloadTask?,
+            makePoller: () -> Task<Void, Never>?,
+            resume: () -> Void
+        ) -> Bool {
+            lock.withLock {
+                if cancelled || Task.isCancelled {
+                    return false
+                }
+                self.task = task
+                self.poller = makePoller()
+                resume()
+                return true
+            }
+        }
+
+        func stopPoller() {
+            let pollerToCancel: Task<Void, Never>? = lock.withLock {
+                let current = poller
+                poller = nil
+                return current
+            }
+            pollerToCancel?.cancel()
+        }
+
+        func cancel() {
+            let (taskToCancel, pollerToCancel): (URLSessionDownloadTask?, Task<Void, Never>?) = lock.withLock {
+                cancelled = true
+                let currentTask = task
+                let currentPoller = poller
+                poller = nil
+                return (currentTask, currentPoller)
+            }
+            taskToCancel?.cancel()
+            pollerToCancel?.cancel()
+        }
     }
 }

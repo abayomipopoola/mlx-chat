@@ -54,26 +54,32 @@ and store it somewhere safe (a lost key means you can't sign future updates).
 2. **Build, notarize, and staple the DMG** as usual (`scripts/release.sh`). You
    should end up with `dist/MLX-Chat-<version>.dmg`.
 
-3. **Generate the signed appcast.** Point `generate_appcast` at a folder that
-   contains the DMG; it signs each update with your private key and writes
-   `appcast.xml`. Use `--download-url-prefix` so the enclosure URLs point at the
-   GitHub release assets:
+3. **Generate the signed appcast.** Point `generate_appcast` at `dist/` once the
+   notarized DMG is ready (`scripts/release.sh` runs this automatically). Because
+   production DMGs are served from Cloudflare R2 rather than GitHub release
+   assets, `--download-url-prefix` **must** match the R2 bucket prefix (never
+   the GitHub release asset URL, which would break live Sparkle downloads):
 
    ```sh
    "$SPARKLE_BIN/generate_appcast" dist/ \
-     --download-url-prefix "https://github.com/abayomipopoola/mlx-chat/releases/download/v<version>/"
+     --download-url-prefix "https://pub-d33413b11479471ca77e9b28492c77b5.r2.dev/releases/mlx-chat/"
    ```
 
    This produces `dist/appcast.xml`. Add release notes by putting a
    `MLX-Chat-<version>.html` next to the DMG before running it (Sparkle shows it
    in the update dialog).
 
-4. **Publish the GitHub Release.** Tag it `v<version>`, then attach **both**
-   `MLX-Chat-<version>.dmg` and `appcast.xml`:
+4. **Upload the DMG to R2 before publishing the appcast.** Upload
+   `dist/MLX-Chat-<version>.dmg` to
+   `https://pub-d33413b11479471ca77e9b28492c77b5.r2.dev/releases/mlx-chat/MLX-Chat-<version>.dmg`
+   and confirm it returns HTTP 200 with the expected byte size before making
+   `appcast.xml` live.
+
+5. **Publish the GitHub Release.** Tag it `v<version>`, then attach
+   `dist/appcast.xml` (so `latest/download/appcast.xml` resolves):
 
    ```sh
    gh release create v<version> \
-     dist/MLX-Chat-<version>.dmg \
      dist/appcast.xml \
      --title "MLX Chat <version>" --notes "…"
    ```

@@ -76,7 +76,7 @@ public enum RangeCopyPlanner {
         return RangeCopyPlan(scalarCopies: copies,
                              coalescedCopies: coalesced,
                              remoteBytesToDownload: downloaded,
-                             remoteGapBytesDownloaded: downloaded - copied,
+                             remoteGapBytesDownloaded: downloaded > copied ? downloaded - copied : 0,
                              canonicalFingerprint: fingerprint,
                              residentIndexSha256: identity,
                              expectedOutputs: expectedOutputs)
@@ -144,7 +144,7 @@ public enum RangeCopyPlanner {
         return RangeCopyPlan(scalarCopies: copies,
                              coalescedCopies: coalesced,
                              remoteBytesToDownload: downloaded,
-                             remoteGapBytesDownloaded: downloaded - copied,
+                             remoteGapBytesDownloaded: downloaded > copied ? downloaded - copied : 0,
                              canonicalFingerprint: fingerprint,
                              residentIndexSha256: indexSha,
                              expectedOutputs: expectedOutputs)

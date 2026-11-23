@@ -2,6 +2,34 @@ import AppKit
 import MarkdownUI
 import SwiftUI
 
+/// Caches decoded user-message images by message id so scrolling and sibling
+/// streaming flushes do not re-decode image data on the main thread.
+final class DecodedMessageImageCache {
+    static let shared = DecodedMessageImageCache()
+
+    private let cache: NSCache<NSUUID, NSImage>
+
+    init(countLimit: Int = 64) {
+        let cache = NSCache<NSUUID, NSImage>()
+        cache.countLimit = countLimit
+        self.cache = cache
+    }
+
+    func image(
+        for messageID: UUID,
+        data: Data,
+        decode: (Data) -> NSImage? = { NSImage(data: $0) }
+    ) -> NSImage? {
+        let key = messageID as NSUUID
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let decoded = decode(data) else { return nil }
+        cache.setObject(decoded, forKey: key)
+        return decoded
+    }
+}
+
 struct MessageView: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -27,7 +55,9 @@ struct MessageView: View {
             HStack {
                 Spacer(minLength: 80)
                 VStack(alignment: .trailing, spacing: 8) {
-                    if let data = message.imageData, let nsImage = NSImage(data: data) {
+                    if let data = message.imageData,
+                       let nsImage = DecodedMessageImageCache.shared.image(
+                        for: message.id, data: data) {
                         Image(nsImage: nsImage)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
@@ -59,6 +89,7 @@ struct MessageView: View {
                                 MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
                             .markdownImageProvider(
                                 MathBlockProvider(fontSize: 16 + Studio.monaPointBump, color: mathColor))
+                            .id(colorScheme)
                             .textSelection(.enabled)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
@@ -107,6 +138,7 @@ struct MessageView: View {
                     .markdownTheme(.chat)
                     .font(Studio.sans(12))
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .padding(.top, 4)
             } label: {
                 Text(thinkingLabel)
@@ -127,37 +159,55 @@ struct MessageView: View {
         colorScheme == .dark ? NSColor(white: 0.92, alpha: 1) : NSColor(white: 0.12, alpha: 1)
     }
 
+    static func isStreamingTailBlock(
+        isStreamingMessage: Bool,
+        blockID: Int,
+        lastBlockID: Int?
+    ) -> Bool {
+        isStreamingMessage && blockID == lastBlockID
+    }
+
     private var contentBlocks: some View {
-        ForEach(SegmentCache.shared.segments(for: message.id, content: message.content)) { block in
+        let blocks = SegmentCache.shared.segments(for: message.id, content: message.content)
+        let lastBlockID = blocks.last?.id
+        return ForEach(blocks) { block in
             switch block {
-            case .markdown(_, let text):
-                streamingAssistantMarkdown(text)
+            case .markdown(let id, let text):
+                assistantMarkdown(
+                    text,
+                    isStreamingTail: Self.isStreamingTailBlock(
+                        isStreamingMessage: isStreamingThis,
+                        blockID: id,
+                        lastBlockID: lastBlockID))
             case .artifact(let artifact):
                 ExpandableArtifactCard(artifact: artifact)
             }
         }
     }
 
-    /// Preprocess every streaming flush; finished text comes from the cache.
-    /// WelcomeView's anti-ghost pair is applied only to this markdown subview
-    /// so LazyVStack insert animation on `messages.count` is left intact.
+    /// Preprocess only the actively streaming tail block (with plain monospace
+    /// code to avoid blocking the main thread on Highlightr per flush); earlier
+    /// completed blocks and finished messages read from the cache with full syntax
+    /// highlighting.
     @ViewBuilder
-    private func streamingAssistantMarkdown(_ text: String) -> some View {
-        let content = isStreamingThis
+    private func assistantMarkdown(_ text: String, isStreamingTail: Bool) -> some View {
+        let content = isStreamingTail
             ? MarkdownContent(Self.preprocessStreamingFlush(text))
             : MarkdownContentCache.shared.content(for: text)
         let markdown = Markdown(content)
             .markdownTheme(.chat)
-            .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
             .markdownInlineImageProvider(MathInlineProvider(fontSize: Studio.chatFontSize + Studio.monaPointBump, color: mathColor))
             .markdownImageProvider(MathBlockProvider(fontSize: 16 + Studio.monaPointBump, color: mathColor))
+            .id(colorScheme)
             .textSelection(.enabled)
-        if isStreamingThis {
+        if isStreamingTail {
             markdown
+                .markdownCodeSyntaxHighlighter(PlainCodeSyntaxHighlighter.shared)
                 .geometryGroup()
                 .transaction { $0.animation = nil }
         } else {
             markdown
+                .markdownCodeSyntaxHighlighter(HighlightrHighlighter.forScheme(colorScheme))
         }
     }
 
@@ -243,14 +293,17 @@ private struct CopyButton: View {
     let text: String
     var size: CGFloat = 14
     @State private var copied = false
+    @State private var resetTask: Task<Void, Never>?
 
     var body: some View {
         Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             copied = true
-            Task {
+            resetTask?.cancel()
+            resetTask = Task {
                 try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { return }
                 copied = false
             }
         } label: {
@@ -261,6 +314,10 @@ private struct CopyButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(copied ? Color.brandGreen : .secondary)
         .help("Copy")
+        .onDisappear {
+            resetTask?.cancel()
+            resetTask = nil
+        }
     }
 }
 

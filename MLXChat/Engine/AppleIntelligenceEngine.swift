@@ -39,6 +39,25 @@ final class AppleIntelligenceEngine: ChatEngine {
         return 4096
     }
 
+    /// Compute the incremental text delta from FoundationModels' cumulative snapshot
+    /// using UTF-8 scalar-aligned offsets so combining scalars and ZWJ sequences are
+    /// never dropped when grapheme cluster count does not increase.
+    static func snapshotDelta(
+        previousUTF8Offset: Int,
+        current: String
+    ) -> (delta: String, nextUTF8Offset: Int) {
+        let utf8 = current.utf8
+        let count = utf8.count
+        guard count > previousUTF8Offset else {
+            return ("", previousUTF8Offset)
+        }
+        var index = utf8.index(utf8.startIndex, offsetBy: max(0, previousUTF8Offset))
+        while index > utf8.startIndex, index.samePosition(in: current.unicodeScalars) == nil {
+            index = utf8.index(before: index)
+        }
+        return (String(current.unicodeScalars[index...]), count)
+    }
+
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         if let message = Self.availabilityMessage() {
             throw EngineError.unavailable(message)
@@ -90,12 +109,14 @@ final class AppleIntelligenceEngine: ChatEngine {
                     let stream = session.streamResponse(to: Prompt(pending.text), options: options)
 
                     // FoundationModels yields CUMULATIVE snapshots, not deltas.
-                    var emitted = 0
+                    var emittedUTF8 = 0
                     for try await snapshot in stream {
-                        let text = snapshot.content
-                        guard text.count > emitted else { continue }
-                        continuation.yield(.delta(String(text.dropFirst(emitted))))
-                        emitted = text.count
+                        let step = Self.snapshotDelta(
+                            previousUTF8Offset: emittedUTF8,
+                            current: snapshot.content)
+                        guard !step.delta.isEmpty else { continue }
+                        continuation.yield(.delta(step.delta))
+                        emittedUTF8 = step.nextUTF8Offset
                     }
                     continuation.yield(.completed(tokensPerSecond: nil))
                     continuation.finish()

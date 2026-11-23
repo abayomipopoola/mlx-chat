@@ -38,6 +38,9 @@ enum ModelSupport {
         "lfm3_omni",
         // Registered by the app (Spark25): XHToken's Spark-X2.5 and X2.6.
         "spark2_5",
+        // Registered by the app (Inkling2): Thinking Machines' Inkling 2 Mini.
+        "inkling2",
+        "inkling2_loop",
         "minicpm",
         "starcoder2",
         "cohere",
@@ -136,17 +139,27 @@ enum ModelSupport {
         }
 
         // A PyTorch quantized build (FP8, GPTQ, AWQ…) names its method in
-        // `quantization_config` and has no MLX `quantization` block. MLX can't read
-        // its weights, whatever the architecture. MLX conversions often carry both.
-        if dict["quantization"] == nil,
-           let method = (dict["quantization_config"] as? [String: Any])?["quant_method"] as? String {
-            return "This is a PyTorch \(method) build, not an MLX one. Look for an MLX version of this model."
+        // `quantization_config` (top-level or under `text_config`) and has no MLX
+        // `quantization` block. MLX can't read its weights, except Inkling 2's native
+        // `modelopt` NVFP4/MXFP8 checkpoints, which `Inkling2.prepareCheckpoint` maps
+        // directly onto MLX quantized kernels.
+        let textConfig = dict["text_config"] as? [String: Any]
+        let hasMLXQuantization = dict["quantization"] != nil || textConfig?["quantization"] != nil
+        if !hasMLXQuantization {
+            let quantConfig = (dict["quantization_config"] as? [String: Any])
+                ?? (textConfig?["quantization_config"] as? [String: Any])
+            if let method = quantConfig?["quant_method"] as? String {
+                let allowsModelOpt = method == "modelopt" && Inkling2.modelTypes.contains(modelType)
+                if !allowsModelOpt {
+                    return "This is a PyTorch \(method) build, not an MLX one. Look for an MLX version of this model."
+                }
+            }
         }
 
         if let reason = quantizationReason(dict["quantization"] as? [String: Any]) {
             return reason
         }
-        if let textConfig = dict["text_config"] as? [String: Any],
+        if let textConfig,
            let reason = quantizationReason(textConfig["quantization"] as? [String: Any]) {
             return reason
         }
@@ -172,9 +185,9 @@ enum ModelSupport {
     }
 
     /// True when the model is a vision-language model: `config.json` has a
-    /// `vision_config` dictionary, or `model_type` is in the VLM-only set.
+    /// non-empty `vision_config` dictionary, or `model_type` is in the VLM-only set.
     /// Shared types (qwen3_5, gemma3/4, mistral3) are vision only when
-    /// `vision_config` is present. Types in `textOnlyModelTypes` never are.
+    /// `vision_config` is non-empty. Types in `textOnlyModelTypes` never are.
     static func visionCapable(configJSON data: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any]
@@ -185,7 +198,7 @@ enum ModelSupport {
         if let modelType, textOnlyModelTypes.contains(modelType) {
             return false
         }
-        if dict["vision_config"] is [String: Any] {
+        if let visionConfig = dict["vision_config"] as? [String: Any], !visionConfig.isEmpty {
             return true
         }
         if let modelType, visionOnlyModelTypes.contains(modelType) {
@@ -196,30 +209,78 @@ enum ModelSupport {
 
     // MARK: - Quantization
 
-    private static func quantizationReason(_ quant: [String: Any]?) -> String? {
+    private static func quantizationReason(
+        _ quant: [String: Any]?,
+        defaultMode: String = "affine"
+    ) -> String? {
         guard let quant else { return nil }
 
-        if let mode = quant["mode"] as? String, mode != "affine" {
+        let mode = (quant["mode"] as? String) ?? defaultMode
+        if let rawBits = quant["bits"], !(rawBits is NSNull), intValue(rawBits) == nil {
+            return "Quantization bit width isn't supported."
+        }
+        if let rawGroup = quant["group_size"], !(rawGroup is NSNull), intValue(rawGroup) == nil {
+            return "Quantization group size isn't supported."
+        }
+        let bits = intValue(quant["bits"])
+        let groupSize = intValue(quant["group_size"])
+
+        switch mode {
+        case "affine":
+            if let bits, !supportedBits.contains(bits) {
+                return "\(bits)-bit quantization isn't supported."
+            }
+            if let groupSize, !supportedGroupSizes.contains(groupSize) {
+                return "Group size \(groupSize) isn't supported."
+            }
+        case "nvfp4":
+            if let bits, bits != 4 {
+                return "\(bits)-bit NVFP4 quantization isn't supported."
+            }
+            if let groupSize, groupSize != 16 {
+                return "NVFP4 group size \(groupSize) isn't supported."
+            }
+        case "mxfp4":
+            if let bits, bits != 4 {
+                return "\(bits)-bit MXFP4 quantization isn't supported."
+            }
+            if let groupSize, groupSize != 32 {
+                return "MXFP4 group size \(groupSize) isn't supported."
+            }
+        case "mxfp8":
+            if let bits, bits != 8 {
+                return "\(bits)-bit MXFP8 quantization isn't supported."
+            }
+            if let groupSize, groupSize != 32 {
+                return "MXFP8 group size \(groupSize) isn't supported."
+            }
+        default:
             return "Quantization mode “\(mode)” isn't supported."
         }
 
-        if let bits = intValue(quant["bits"]), !supportedBits.contains(bits) {
-            return "\(bits)-bit quantization isn't supported."
+        // Validate per-layer mixed-precision override sub-dictionaries (e.g. "lm_head").
+        for key in quant.keys.sorted() {
+            guard let nested = quant[key] as? [String: Any],
+                  nested["bits"] != nil || nested["group_size"] != nil || nested["mode"] != nil
+            else { continue }
+            if let reason = quantizationReason(nested, defaultMode: mode) {
+                return reason
+            }
         }
-
-        if let groupSize = intValue(quant["group_size"]), !supportedGroupSizes.contains(groupSize) {
-            return "Group size \(groupSize) isn't supported."
-        }
-
         return nil
     }
 
     private static func intValue(_ any: Any?) -> Int? {
-        switch any {
-        case let i as Int: return i
-        case let n as NSNumber: return n.intValue
-        case let s as String: return Int(s)
-        default: return nil
+        if any is Bool { return nil }
+        if let number = any as? NSNumber {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let double = number.doubleValue
+            guard double.isFinite, double.rounded(.towardZero) == double else { return nil }
+            return Int(exactly: double)
         }
+        if let string = any as? String {
+            return Int(string)
+        }
+        return nil
     }
 }

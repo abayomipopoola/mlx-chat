@@ -213,28 +213,39 @@ struct PartialByteBuffer {
 
     private mutating func drainCompleteUTF8() -> String {
         guard !bytes.isEmpty else { return "" }
+        var emitted = ""
+        var chunkStart = 0
         var index = 0
-        var lastComplete = 0
-        while index < bytes.count {
+        let count = bytes.count
+        while index < count {
             let length = utf8SequenceLength(bytes[index])
-            guard length > 0 else {
-                // Invalid lead: emit the complete prefix and drop the bad byte
-                // without inventing U+FFFD mid-stream.
-                let prefix = String(bytes: bytes[0..<lastComplete], encoding: .utf8) ?? ""
-                bytes.removeFirst(lastComplete + 1)
-                return prefix + drainCompleteUTF8()
+            if length == 0 {
+                // Invalid lead: emit complete prefix before this byte and skip it
+                // without inventing U+FFFD mid-stream (iteratively to avoid stack growth).
+                if index > chunkStart {
+                    emitted += String(bytes: bytes[chunkStart..<index], encoding: .utf8) ?? ""
+                }
+                index += 1
+                chunkStart = index
+                continue
             }
-            guard index + length <= bytes.count else { break }
+            guard index + length <= count else { break }
             if !isValidUTF8Sequence(bytes[index..<(index + length)]) {
-                let prefix = String(bytes: bytes[0..<lastComplete], encoding: .utf8) ?? ""
-                bytes.removeFirst(lastComplete + 1)
-                return prefix + drainCompleteUTF8()
+                if index > chunkStart {
+                    emitted += String(bytes: bytes[chunkStart..<index], encoding: .utf8) ?? ""
+                }
+                index += 1
+                chunkStart = index
+                continue
             }
             index += length
-            lastComplete = index
         }
-        let emitted = String(bytes: bytes[0..<lastComplete], encoding: .utf8) ?? ""
-        bytes.removeFirst(lastComplete)
+        if index > chunkStart {
+            emitted += String(bytes: bytes[chunkStart..<index], encoding: .utf8) ?? ""
+        }
+        if index > 0 {
+            bytes.removeFirst(index)
+        }
         return emitted
     }
 

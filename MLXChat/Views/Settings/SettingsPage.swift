@@ -1,5 +1,4 @@
 import AppKit
-import FoundationModels
 import SwiftUI
 
 /// In-frame Settings page, arranged like MLX Studio:
@@ -20,7 +19,9 @@ struct SettingsPage: View {
         }
         .background(Color.detailBackground)
         .onAppear {
-            updates.checkInBackground()
+            if UpdateController.shouldEnableUpdater() {
+                updates.checkInBackground()
+            }
         }
     }
 }
@@ -327,7 +328,7 @@ private struct StorageSection: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Storage Location")
                         .font(Studio.rowTitle)
-                    Text(ModelStore.hubCacheDirectory.path)
+                    Text(ModelStore.modelsRoot.path)
                         .font(.system(size: 13).monospaced())
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -335,7 +336,7 @@ private struct StorageSection: View {
                 }
                 Spacer()
                 Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([ModelStore.hubCacheDirectory])
+                    NSWorkspace.shared.activateFileViewerSelecting([ModelStore.modelsRoot])
                 }
                 .buttonStyle(.plain)
                 .font(Studio.body14Semibold)

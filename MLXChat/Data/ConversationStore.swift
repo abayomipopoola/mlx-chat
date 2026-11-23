@@ -38,8 +38,13 @@ final class ConversationStore {
     }
 
     func delete(_ conversation: Conversation) {
+        greetingDerivedTitleIDs.remove(conversation.id)
         context.delete(conversation)
         persist()
+    }
+
+    func isGreetingDerivedTitle(_ id: UUID) -> Bool {
+        greetingDerivedTitleIDs.contains(id)
     }
 
     func rename(_ conversation: Conversation, to title: String) {

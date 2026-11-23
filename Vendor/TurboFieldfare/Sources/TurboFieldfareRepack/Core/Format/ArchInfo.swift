@@ -260,6 +260,11 @@ struct ArchInfo: Sendable, Equatable {
         }
         let hidden = try i("hidden_size")
         let heads = try i("num_attention_heads")
+        guard hidden > 0, heads > 0, hidden % heads == 0 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "invalid hidden_size (\(hidden)) or num_attention_heads (\(heads))")
+        }
         let headDim = hidden / heads
         let arch = ArchInfo(
             hiddenSize: hidden,

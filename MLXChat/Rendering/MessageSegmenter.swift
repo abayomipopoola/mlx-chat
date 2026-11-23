@@ -25,7 +25,7 @@ struct Artifact: Identifiable, Hashable {
     let isComplete: Bool
 
     var lineCount: Int {
-        content.isEmpty ? 0 : content.components(separatedBy: "\n").count
+        MessageSegmenter.lineCount(of: content)
     }
 
     var suggestedFileExtension: String {
@@ -166,12 +166,23 @@ enum MessageSegmenter {
 
     // MARK: - Artifact classification
 
+    /// Counts lines by scanning UTF-8 newline bytes directly, avoiding the
+    /// `[String]` allocation of `components(separatedBy: "\n")`.
+    static func lineCount(of text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        var count = 1
+        for byte in text.utf8 where byte == 0x0A {
+            count += 1
+        }
+        return count
+    }
+
     private static func isArtifact(language: String?, content: String) -> Bool {
         let lang = language?.lowercased()
         if lang == "html" || lang == "svg" { return true }
         if isMarkdownDocumentFence(language: language) { return false }
-        if content.count >= artifactMinChars { return true }
-        return content.components(separatedBy: "\n").count >= artifactMinLines
+        if content.utf8.count >= artifactMinChars { return true }
+        return lineCount(of: content) >= artifactMinLines
     }
 
     private static func isMarkdownDocumentFence(language: String?) -> Bool {
@@ -210,7 +221,7 @@ enum MessageSegmenter {
             .components(separatedBy: "\n")
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
             let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-            for prefix in ["//", "#!", "#", "--", "/*", "<!--"] where trimmed.hasPrefix(prefix) {
+            for prefix in ["//", "#!", "# ", "--", "/*", "<!--"] where trimmed.hasPrefix(prefix) {
                 var name = String(trimmed.dropFirst(prefix.count))
                 for suffix in ["*/", "-->"] where name.hasSuffix(suffix) {
                     name = String(name.dropLast(suffix.count))

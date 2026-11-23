@@ -130,17 +130,13 @@ public struct ImageMetadataReader: Sendable {
                 width: width, height: height, pixelLimit: limits.maximumSourcePixels)
         }
         let depth = (dictionary[kCGImagePropertyDepth] as? NSNumber)?.intValue ?? 8
+        guard depth >= 0 else {
+            throw VisionImageError.invalidMetadata("negative bit depth \(depth)")
+        }
         // Four channels is the decode target; source depth drives how much
         // ImageIO materialises before the thumbnail conversion.
-        let (depthBytes, depthOverflow) = pixels.multipliedReportingOverflow(
-            by: max(1, depth / 8) * 4)
-        // One ceiling, because every format is now decoded at native size:
-        // the reduction belongs to our own filter, so ImageIO no longer gets to
-        // subsample JPEG or HEIF. The split that gave those formats 320 MB
-        // rested on a shortcut this path deliberately gave up, and the cost is
-        // two full surfaces live at once — the decoded CGImage and the one we
-        // draw into — so the bound has to cover both.
-        guard !depthOverflow, depthBytes <= limits.maximumDecodedBytes else {
+        guard let depthBytes = Self.decodedByteEstimate(pixels: pixels, depth: depth),
+              depthBytes <= limits.maximumDecodedBytes else {
             throw VisionImageError.decodedBytesTooLarge(
                 width: width, height: height, byteLimit: limits.maximumDecodedBytes)
         }
@@ -163,5 +159,18 @@ public struct ImageMetadataReader: Sendable {
             bitsPerComponent: bitsPerComponent,
             colorModel: colorModel,
             typeIdentifier: typeIdentifier)
+    }
+
+    internal static func decodedByteEstimate(pixels: Int, depth: Int) -> Int? {
+        guard pixels >= 0, depth >= 0 else { return nil }
+        let clampedDepth = max(depth, 1)
+        let (depthPlus7, depthOverflow) = clampedDepth.addingReportingOverflow(7)
+        guard !depthOverflow else { return nil }
+        let bytesPerChannel = depthPlus7 / 8
+        let (bytesPerPixel, pixelOverflow) = bytesPerChannel.multipliedReportingOverflow(by: 4)
+        guard !pixelOverflow else { return nil }
+        let (total, totalOverflow) = pixels.multipliedReportingOverflow(by: bytesPerPixel)
+        guard !totalOverflow else { return nil }
+        return total
     }
 }

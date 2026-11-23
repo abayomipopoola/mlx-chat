@@ -75,11 +75,11 @@ public enum DiskSpaceChecker {
     }
 
     private static func directoryForProbe(_ path: String) -> String {
-        let ns = path as NSString
-        let ext = ns.pathExtension
-        if ext.isEmpty {
-            return path
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+           !isDirectory.boolValue {
+            return (path as NSString).deletingLastPathComponent
         }
-        return ns.deletingLastPathComponent
+        return path
     }
 }

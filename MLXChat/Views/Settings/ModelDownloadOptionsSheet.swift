@@ -8,6 +8,7 @@ enum ModelDownloadMode: String, Hashable {
 
     static func availableModes(for modelID: String) -> [ModelDownloadMode] {
         let streams = StreamedMoEInstall.supportsSSDStreaming(sourceModelID: modelID)
+            || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: modelID)
         let mlxBlocked = ModelCatalog.model(for: modelID)?.installRestriction != nil
         if streams && mlxBlocked { return [.ssdStreamed] }
         return streams ? [.mlx, .ssdStreamed] : [.mlx]
@@ -41,10 +42,16 @@ struct ModelDownloadOptionsSheet: View {
     private var streamedVariant: StreamedMoEVariant? {
         StreamedMoEInstall.variant(forSourceModelID: model.id)
     }
-    private var supportsSSDStreaming: Bool { streamedVariant != nil }
-    private var streamedModelID: String? { streamedVariant?.modelID }
+    private var mlxStreamedVariant: MLXStreamedVariant? {
+        MLXStreamedInstall.variant(forSourceModelID: model.id)
+    }
+    private var supportsSSDStreaming: Bool { streamedVariant != nil || mlxStreamedVariant != nil }
+    private var streamedModelID: String? { streamedVariant?.modelID ?? mlxStreamedVariant?.modelID }
     private var isSSDReady: Bool {
         streamedModelID.map(store.isAvailable) ?? false
+    }
+    private var isSourceMLXAvailable: Bool {
+        mlxStreamedVariant.map { store.isAvailable($0.sourceModelID) } ?? false
     }
     private var isSSDDownloading: Bool {
         streamedModelID.map(store.isDownloading) ?? false
@@ -59,9 +66,26 @@ struct ModelDownloadOptionsSheet: View {
             : "Download \(model.displayName)"
     }
 
+    private var gemmaVisionPackStatus: (missing: Bool, isManaged: Bool) {
+        streamedModelID.map(store.gemmaVisionPackMissing) ?? (false, false)
+    }
+
+    private var gemmaVisionCompanionMissing: Bool {
+        gemmaVisionPackStatus.missing && gemmaVisionPackStatus.isManaged
+    }
+
+    private var externalGemmaVisionCompanionMissing: Bool {
+        gemmaVisionPackStatus.missing && !gemmaVisionPackStatus.isManaged
+    }
+
     private var streamedStatusTitle: String {
         if gemmaVisionCompanionMissing { return "Vision pack needed" }
+        if externalGemmaVisionCompanionMissing { return "Vision pack not found" }
         if isSSDReady { return "Ready to use" }
+        if mlxStreamedVariant != nil {
+            if isSourceMLXAvailable { return "Shared weights on disk" }
+            return "Shared download setup"
+        }
         switch managedSSDInstallState {
         case .complete: return "Install found"
         case .resumable: return "Saved download"
@@ -70,7 +94,13 @@ struct ModelDownloadOptionsSheet: View {
     }
 
     private var streamedStatusIcon: String {
+        if gemmaVisionCompanionMissing || externalGemmaVisionCompanionMissing {
+            return "exclamationmark.triangle.fill"
+        }
         if isSSDReady { return "checkmark.circle.fill" }
+        if mlxStreamedVariant != nil {
+            return isSourceMLXAvailable ? "externaldrive.fill" : "sparkles"
+        }
         switch managedSSDInstallState {
         case .complete: return "externaldrive.fill"
         case .resumable: return "arrow.clockwise.circle.fill"
@@ -78,18 +108,20 @@ struct ModelDownloadOptionsSheet: View {
         }
     }
 
-    private var gemmaVisionCompanionMissing: Bool {
-        guard let streamedVariant, streamedVariant.architecture == .gemma4 else {
-            return false
+    private var streamedStatusColor: Color {
+        if gemmaVisionCompanionMissing || externalGemmaVisionCompanionMissing {
+            return Color.iconOrange
         }
-        return (isSSDReady || managedSSDInstallState == .complete)
-            && !StreamedMoEInstall.visionCompanionLooksPresent(
-                beside: streamedVariant.managedDirectory)
+        if isSSDReady { return Color.brandGreen }
+        return .primary
     }
 
     private var ssdPrimaryActionTitle: String {
         if gemmaVisionCompanionMissing {
             return "Download vision pack"
+        }
+        if mlxStreamedVariant != nil {
+            return (isSSDReady || isSourceMLXAvailable) ? "Use SSD Model" : "Download SSD Model"
         }
         if isSSDReady || managedSSDInstallState == .complete {
             return "Use SSD Model"
@@ -196,6 +228,11 @@ struct ModelDownloadOptionsSheet: View {
                         .font(Studio.sans(10))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("ssdExpertCacheMemory")
+                } else if let mlxStreamedVariant {
+                    Text("\(streamedExpertCacheSlots) slots use about \(Self.storage(mlxStreamedVariant.expertCacheBytes(forSlots: streamedExpertCacheSlots))) of RAM for \(mlxStreamedVariant.displayName) once filled.")
+                        .font(Studio.sans(10))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("ssdExpertCacheMemory")
                 }
             }
 
@@ -274,7 +311,7 @@ struct ModelDownloadOptionsSheet: View {
             VStack(alignment: .leading, spacing: 10) {
             Label(streamedStatusTitle, systemImage: streamedStatusIcon)
                 .font(Studio.body14Semibold)
-                .foregroundStyle(isSSDReady ? Color.brandGreen : .primary)
+                .foregroundStyle(streamedStatusColor)
 
             if let progress = store.streamedInstallProgress(
                 for: streamedVariant.modelID), isSSDDownloading {
@@ -299,6 +336,11 @@ struct ModelDownloadOptionsSheet: View {
                 Text("Download: about \(Self.storage(StreamedMoEInstall.approximateVisionCompanionBytes)) · Free: \(Self.storage(UInt64(max(store.availableBytes, 0))))")
                     .font(Studio.sans(10))
                     .foregroundStyle(.secondary)
+            } else if externalGemmaVisionCompanionMissing {
+                Text("The external SSD text model is ready, but no sibling vision pack was found beside that folder. Add its companion vision directory next to it to attach images.")
+                    .font(Studio.body13)
+                    .foregroundStyle(Color.subtitleGray)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if isSSDReady {
                 Text("MLX Chat validated the streamed layout. The install stays on disk and only the experts needed for each token enter memory.")
                     .font(Studio.body13)
@@ -338,6 +380,51 @@ struct ModelDownloadOptionsSheet: View {
                     .font(Studio.sans(10, weight: .semibold))
                     .accessibilityIdentifier("chooseExistingStreamedInstall")
             }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .studioCard(stroke: (gemmaVisionCompanionMissing || externalGemmaVisionCompanionMissing)
+                ? .iconOrange.opacity(0.45)
+                : (isSSDReady ? .brandGreen.opacity(0.45) : .cardStroke))
+        } else if let mlxStreamedVariant {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(streamedStatusTitle, systemImage: streamedStatusIcon)
+                    .font(Studio.body14Semibold)
+                    .foregroundStyle(streamedStatusColor)
+
+                if let fraction = store.downloadProgress[mlxStreamedVariant.sourceModelID] {
+                    Text("Downloading shared MLX weights…")
+                        .font(Studio.body13)
+                        .foregroundStyle(Color.subtitleGray)
+                    ProgressView(value: max(0.01, fraction))
+                        .progressViewStyle(.linear)
+                        .tint(Color.iconBlue)
+                        .accessibilityIdentifier("ssdInstallProgress")
+                } else if isSSDReady {
+                    Text("SSD-streamed mode is active using the shared MLX download. Only the active core, KV cache, and expert cache enter RAM.")
+                        .font(Studio.body13)
+                        .foregroundStyle(Color.subtitleGray)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if isSourceMLXAvailable {
+                    Text("Shared MLX weights are already on disk. Enable SSD-streamed mode with no extra disk copy.")
+                        .font(Studio.body13)
+                        .foregroundStyle(Color.subtitleGray)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Downloads the standard MLX files once and enables SSD-streamed mode with no second copy or repack.")
+                        .font(Studio.body13)
+                        .foregroundStyle(Color.subtitleGray)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Download: about \(Self.storage(mlxStreamedVariant.approximateDownloadBytes)) · Free: \(Self.storage(UInt64(max(store.availableBytes, 0))))")
+                        .font(Studio.sans(10))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = store.downloadError(for: mlxStreamedVariant.modelID) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(Studio.sans(10))
+                        .foregroundStyle(Color.iconOrange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .studioCard(stroke: isSSDReady ? .brandGreen.opacity(0.45) : .cardStroke)
@@ -401,6 +488,21 @@ struct ModelDownloadOptionsSheet: View {
 
     private func useOrDownloadSSD() {
         guard let streamedModelID else { return }
+        if let mlxStreamedVariant {
+            let wasSelected = chat.selectedModelID == streamedModelID
+            if store.isAvailable(mlxStreamedVariant.sourceModelID) {
+                store.enableMLXStreamedModel(mlxStreamedVariant.modelID)
+                chat.selectModel(mlxStreamedVariant.modelID)
+                if wasSelected {
+                    chat.preloadSelectedModelIfAvailable()
+                }
+            } else {
+                store.enableAndDownloadMLXStreamedModel(mlxStreamedVariant.modelID)
+                chat.selectModel(mlxStreamedVariant.modelID)
+            }
+            dismiss()
+            return
+        }
         if gemmaVisionCompanionMissing {
             store.installStreamedModel(streamedModelID)
             return

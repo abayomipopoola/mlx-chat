@@ -29,11 +29,20 @@ final class UpdateController: NSObject, SPUUpdaterDelegate {
             return
         }
 #endif
-        guard Self.isConfigured else { return }
+        guard Self.shouldEnableUpdater(), Self.isConfigured else { return }
         controller = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         // Updates surface through our banner, not Sparkle's own scheduled prompts.
         controller?.updater.automaticallyChecksForUpdates = false
+    }
+
+    static func shouldEnableUpdater(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard environment["XCTestConfigurationFilePath"] == nil else { return false }
+        guard !arguments.contains("--capture-release-video") else { return false }
+        return true
     }
 
     /// The running app's version, e.g. "1.0.0".
@@ -50,6 +59,7 @@ final class UpdateController: NSObject, SPUUpdaterDelegate {
 
     /// Silent probe used to drive the banner; shows no UI unless the user acts.
     func checkInBackground() {
+        guard Self.shouldEnableUpdater() else { return }
         controller?.updater.checkForUpdateInformation()
     }
 

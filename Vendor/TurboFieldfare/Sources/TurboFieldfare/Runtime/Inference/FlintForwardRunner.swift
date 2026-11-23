@@ -185,6 +185,9 @@ public final class FlintForwardRunner: ContinuableLogitProducer, ContextWindowRe
                                       @unchecked Sendable {
     public let maxContext: Int
     public private(set) var position: Int = 0
+    /// Highest logical position written since the last `reset()`. Sliding KV
+    /// ring overwrite depends on this high-water mark, not just `position`.
+    private var highWaterPosition: Int = 0
     public let supportsRewind = true
 
     private let model: Model
@@ -463,6 +466,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer, ContextWindowRe
 
     public func reset() {
         position = 0
+        highWaterPosition = 0
     }
 
     /// The cached key row for `position` in `layer`, for verification. Nil
@@ -470,7 +474,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer, ContextWindowRe
     public func keyCacheRow(layer: Int, position target: Int) -> [Float16]? {
         guard let buffer = kCache[layer], target >= 0, target < position else { return nil }
         let ring = cfg.layerIsFull(layer) ? 0 : slidingRingCapacity
-        if ring > 0, target < position - ring { return nil }
+        if ring > 0, target < highWaterPosition - ring { return nil }
         let kvDim = cfg.numKVHeads * cfg.headDim
         let slot = ring > 0 ? target % ring : target
         let row = buffer.contents().assumingMemoryBound(to: Float16.self) + slot * kvDim
@@ -479,13 +483,28 @@ public final class FlintForwardRunner: ContinuableLogitProducer, ContextWindowRe
 
     public var continuationPosition: Int { position }
 
+    internal static func canContinue(
+        position: Int,
+        highWaterPosition: Int,
+        expectedPosition: Int,
+        maxRewindDistance: Int
+    ) -> Bool {
+        expectedPosition >= 0
+            && expectedPosition <= position
+            && highWaterPosition - expectedPosition <= maxRewindDistance
+    }
+
     /// Continues at `expectedPosition`. Later cache slots are overwritten by
     /// the next tokens, and attention never reads past the current position.
     public func prepareForContinuation(expectedPosition: Int) throws {
-        guard expectedPosition >= 0, expectedPosition <= position,
-              position - expectedPosition <= maxRewindDistance else {
+        guard Self.canContinue(
+            position: position,
+            highWaterPosition: highWaterPosition,
+            expectedPosition: expectedPosition,
+            maxRewindDistance: maxRewindDistance
+        ) else {
             throw PrefillError.prefillCursorMismatch(
-                "continuation expected position \(expectedPosition), current \(position)")
+                "continuation expected position \(expectedPosition), current \(position), highWater \(highWaterPosition)")
         }
         position = expectedPosition
     }
@@ -574,6 +593,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer, ContextWindowRe
         try commitAndWait(command)
         try drainPendingCommands()
         position += 1
+        highWaterPosition = max(highWaterPosition, position)
     }
 
     /// `hidden += delta`, then `normed = RMSNorm(hidden) * weight`, saturating inf.
@@ -915,7 +935,7 @@ extension FlintForwardRunner: ChunkedPrefillRunner {
         defer { prefillBuffers = nil }
         // A sliding layer's ring must still hold the window of every token in
         // a chunk after the whole chunk's keys are written.
-        let chunk = min(prefillChunkTokens, maxRewindDistance)
+        let chunk = max(1, min(prefillChunkTokens, maxRewindDistance))
         var start = tokens.startIndex
         while start < tokens.endIndex {
             try Task.checkCancellation()
@@ -1087,6 +1107,7 @@ extension FlintForwardRunner {
         try commitAndWait(command)
         try drainPendingCommands()
         position += count
+        highWaterPosition = max(highWaterPosition, position)
     }
 
     private func encodeEmbeddingBlock(_ command: MTLCommandBuffer, buffers: PrefillBuffers,

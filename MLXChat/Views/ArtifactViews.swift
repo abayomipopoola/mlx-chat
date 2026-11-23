@@ -14,6 +14,8 @@ struct ExpandableArtifactCard: View {
     @State private var expanded = false
     @State private var tab: Tab = .code
     @State private var copied = false
+    @State private var copyResetTask: Task<Void, Never>?
+    @State private var saveError: String?
 
     enum Tab: String, CaseIterable { case preview = "Preview", code = "Code" }
 
@@ -51,6 +53,20 @@ struct ExpandableArtifactCard: View {
             if ProcessInfo.processInfo.arguments.contains("--expand-artifacts") {
                 expanded = true
             }
+        }
+        .onDisappear {
+            copyResetTask?.cancel()
+            copyResetTask = nil
+        }
+        .alert(
+            "Couldn’t save artifact",
+            isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } })
+        ) {
+            Button("OK", role: .cancel) { saveError = nil }
+        } message: {
+            Text(saveError ?? "Unknown error")
         }
     }
 
@@ -99,8 +115,10 @@ struct ExpandableArtifactCard: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(artifact.content, forType: .string)
                 copied = true
-                Task {
+                copyResetTask?.cancel()
+                copyResetTask = Task {
                     try? await Task.sleep(for: .seconds(1.5))
+                    guard !Task.isCancelled else { return }
                     copied = false
                 }
             } label: {
@@ -176,7 +194,11 @@ struct ExpandableArtifactCard: View {
         panel.nameFieldStringValue = slug(artifact.title) + "." + artifact.suggestedFileExtension
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            try? artifact.content.write(to: url, atomically: true, encoding: .utf8)
+            do {
+                try artifact.content.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                saveError = error.localizedDescription
+            }
         }
     }
 
@@ -199,8 +221,15 @@ struct WebHTMLView: NSViewRepresentable {
          {"trigger":{"url-filter":"^file://.*"},"action":{"type":"block"}}]
         """
 
-    private static let compiledNetworkBlock: Task<WKContentRuleList?, Never> = Task {
-        await withCheckedContinuation { continuation in
+    @MainActor
+    private static var cachedNetworkBlockRuleList: WKContentRuleList?
+
+    @MainActor
+    private static func resolveNetworkBlockRuleList() async -> WKContentRuleList? {
+        if let cached = cachedNetworkBlockRuleList {
+            return cached
+        }
+        let compiled: WKContentRuleList? = await withCheckedContinuation { continuation in
             WKContentRuleListStore.default().compileContentRuleList(
                 forIdentifier: "artifact-network-block",
                 encodedContentRuleList: networkBlockRules
@@ -208,6 +237,10 @@ struct WebHTMLView: NSViewRepresentable {
                 continuation.resume(returning: list)
             }
         }
+        if let compiled {
+            cachedNetworkBlockRuleList = compiled
+        }
+        return compiled
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -219,14 +252,16 @@ struct WebHTMLView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         let coordinator = context.coordinator
-        Task {
-            let list = await Self.compiledNetworkBlock.value
-            await MainActor.run {
-                if let list {
-                    webView.configuration.userContentController.add(list)
-                }
-                coordinator.markContentRulesResolved()
+        Task { @MainActor in
+            let list = await Self.resolveNetworkBlockRuleList()
+            guard !coordinator.isDismantled else { return }
+            if let list {
+                webView.configuration.userContentController.add(list)
+                coordinator.applyContentRulesResult(installed: true)
                 coordinator.loadPendingHTML(in: webView)
+            } else {
+                // Fail closed: never load untrusted HTML without network-blocking rules.
+                coordinator.applyContentRulesResult(installed: false)
             }
         }
         return webView
@@ -236,24 +271,50 @@ struct WebHTMLView: NSViewRepresentable {
         context.coordinator.enqueueHTML(html, in: webView)
     }
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.dismantle(webView: webView)
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate {
+        enum ContentRulesState: Equatable {
+            case pending
+            case installed
+            case failed
+        }
+
         var lastHTML: String?
         var pendingHTML: String?
-        private var contentRulesResolved = false
+        private(set) var contentRulesState: ContentRulesState = .pending
+        private(set) var isDismantled = false
+
+        var canLoadPendingHTML: Bool {
+            !isDismantled
+                && contentRulesState == .installed
+                && pendingHTML != nil
+                && lastHTML != pendingHTML
+        }
 
         func enqueueHTML(_ html: String, in webView: WKWebView) {
+            guard !isDismantled else { return }
             pendingHTML = html
             loadPendingHTML(in: webView)
         }
 
-        func markContentRulesResolved() {
-            contentRulesResolved = true
+        func applyContentRulesResult(installed: Bool) {
+            contentRulesState = installed ? .installed : .failed
         }
 
         func loadPendingHTML(in webView: WKWebView) {
-            guard contentRulesResolved, let html = pendingHTML, lastHTML != html else { return }
+            guard canLoadPendingHTML, let html = pendingHTML else { return }
             lastHTML = html
             webView.loadHTMLString(html, baseURL: nil)
+        }
+
+        func dismantle(webView: WKWebView) {
+            isDismantled = true
+            pendingHTML = nil
+            webView.stopLoading()
+            webView.navigationDelegate = nil
         }
 
         func webView(

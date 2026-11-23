@@ -105,7 +105,7 @@ struct ModelPickerPanel: View {
                     modelRow(
                         id: model.id,
                         name: model.pickerDisplayName,
-                        resident: chat.runtime.loadedModelID == model.id)
+                        resident: chat.runtime.residentModelID == model.id)
                 }
             }
 
@@ -135,24 +135,25 @@ struct ModelPickerPanel: View {
 
     private func modelRow(id: String, name: String, resident: Bool) -> some View {
         HStack(spacing: 6) {
-            // Leading checkmark slot (native-menu convention); reserved for
-            // every row so names stay aligned. 10pt matches the old AppKit
-            // menu's check glyph, which is drawn in the label color.
-            Image(systemName: "checkmark")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.primary)
-                .opacity(chat.selectedModelID == id ? 1 : 0)
-                .frame(width: 14)
-
             Button {
                 chat.selectModel(id)
                 dropdown.open = nil
             } label: {
-                Text(name)
-                    .font(Studio.sans(13))
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                HStack(spacing: 6) {
+                    // Leading checkmark slot (native-menu convention); inside the
+                    // button label so clicking the left margin selects the row.
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .opacity(chat.selectedModelID == id ? 1 : 0)
+                        .frame(width: 14)
+
+                    Text(name)
+                        .font(Studio.sans(13))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(chat.isStreaming)
@@ -170,19 +171,16 @@ struct ModelPickerPanel: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(chat.isStreaming)
-                .help("Eject from memory and switch to Apple Intelligence")
+                .help("Eject from memory")
             }
         }
         .padding(.vertical, 3)
     }
 
-    /// Frees the resident local model and falls back to Apple Intelligence.
-    /// (The selection didSet already unloads via warmSwitchedModel;
-    /// unloadCurrent is the idempotent guarantee.)
+    /// Frees the resident local model and falls back per ChatController's policy.
     private func eject() {
         guard !chat.isStreaming else { return }
-        chat.selectModel(appleIntelligenceEngineID)
-        chat.runtime.unloadCurrent()
+        chat.ejectResidentModel()
         dropdown.open = nil
     }
 }

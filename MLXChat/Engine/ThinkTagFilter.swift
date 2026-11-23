@@ -79,6 +79,10 @@ struct ThinkTagFilter {
             if let range = carry.range(of: closeMarker) {
                 let thinking = String(carry[..<range.lowerBound])
                 var rest = String(carry[range.upperBound...])
+                // Intentional scope decision (AUDIT-28): strip leading newlines only
+                // within the same chunk as `closeMarker`, not across a subsequent chunk.
+                // Cross-chunk newline preservation is pinned by
+                // `Tests/MLXChatTests/StreamedMoETests.swift:559-563`.
                 while rest.hasPrefix("\n") { rest.removeFirst() }
                 carry = ""
                 mode = .content
@@ -121,6 +125,40 @@ struct ThinkTagFilter {
         case .content:
             return ("", carry, false)
         }
+    }
+
+    /// Flush safe buffered text on cancellation without reclassifying open reasoning
+    /// as visible content and without emitting a partial open/close marker prefix.
+    mutating func flushPartialOnCancel() -> (thinking: String, content: String) {
+        defer {
+            pendingBuffer = ""
+            carry = ""
+            emittedThinking = ""
+        }
+        switch mode {
+        case .pending:
+            let trimmed = String(pendingBuffer.drop(while: { $0.isWhitespace }))
+            guard !trimmed.isEmpty, !openMarker.hasPrefix(trimmed) else { return ("", "") }
+            return ("", trimmed)
+        case .thinking:
+            let safe = Self.safePrefixExcludingPartialMarker(carry, marker: closeMarker)
+            emittedThinking += safe
+            return (safe, "")
+        case .content:
+            return ("", carry)
+        }
+    }
+
+    private static func safePrefixExcludingPartialMarker(_ text: String, marker: String) -> String {
+        guard !text.isEmpty, !marker.isEmpty else { return text }
+        var index = text.startIndex
+        while index < text.endIndex {
+            if marker.hasPrefix(text[index...]) {
+                return String(text[..<index])
+            }
+            index = text.index(after: index)
+        }
+        return text
     }
 }
 
@@ -171,5 +209,11 @@ struct ThinkingEventRouter {
             if !flush.thinking.isEmpty { emit(.thinkingDelta(flush.thinking)) }
             if !flush.content.isEmpty { emit(.delta(flush.content)) }
         }
+    }
+
+    mutating func flushOnCancel(emit: (EngineEvent) -> Void) {
+        let flush = filter.flushPartialOnCancel()
+        if !flush.thinking.isEmpty { emit(.thinkingDelta(flush.thinking)) }
+        if !flush.content.isEmpty { emit(.delta(flush.content)) }
     }
 }

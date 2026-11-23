@@ -216,6 +216,7 @@ struct RootView: View {
         ZStack {
             ChatScreen(
                 conversation: selectedConversation,
+                canFocusComposer: navigation.path.isEmpty,
                 onCreateConversation: {
                     let conversation = chat.conversationStore?.newConversation()
                     selectedConversationID = conversation?.id
@@ -272,9 +273,7 @@ struct RootView: View {
                 Color.clear
                     .frame(width: 9)
                     .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
+                    .balancedCursor(.resizeLeftRight)
                     .gesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { value in

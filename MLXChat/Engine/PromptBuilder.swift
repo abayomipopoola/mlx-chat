@@ -34,15 +34,19 @@ enum PromptBuilder {
         func tokens(_ message: EngineMessage) -> Int { (message.text.count + 3) / 4 }
 
         var total = history.reduce(0) { $0 + tokens($1) }
-        guard total > budget, history.count > 1 else { return history }
-
         var result = history
-        // Drop from the front in pairs while over budget, always keeping the last message.
-        while total > budget, result.count > 1 {
-            let dropCount = result.count > 2 ? 2 : 1
-            for _ in 0..<dropCount where result.count > 1 {
-                total -= tokens(result.removeFirst())
+        if total > budget, result.count > 1 {
+            // Drop from the front in pairs while over budget, always keeping the last message.
+            while total > budget, result.count > 1 {
+                let dropCount = result.count > 2 ? 2 : 1
+                for _ in 0..<dropCount where result.count > 1 {
+                    total -= tokens(result.removeFirst())
+                }
             }
+        }
+        // Keep history starting on a user turn while preserving the final pending message.
+        while result.count > 1, result.first?.role != .user {
+            result.removeFirst()
         }
         return result
     }

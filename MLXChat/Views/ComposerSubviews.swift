@@ -4,6 +4,7 @@ import SwiftUI
 // MARK: - Pending attachments
 
 struct PendingAttachmentStrip: View {
+    var hasPendingImage: Bool = false
     let pendingImagePreview: NSImage?
     let pendingFileName: String?
     let onClearImage: () -> Void
@@ -21,6 +22,22 @@ struct PendingAttachmentStrip: View {
                     clearChipButton { onClearImage() }
                         .offset(x: 6, y: -6)
                 }
+            } else if hasPendingImage {
+                HStack(spacing: 6) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.iconBlue)
+                    Text("Image")
+                        .font(Studio.sans(12.5))
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
+                    clearChipButton { onClearImage() }
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 6)
+                .padding(.vertical, 6)
+                .studioQuietFill(in: Capsule())
+                .accessibilityIdentifier("composerImageFallbackChip")
             }
 
             if let name = pendingFileName {
@@ -162,9 +179,10 @@ private struct ErrorBannerRow: View {
                     Button("Retry") { chat.retry() }
                         .controlSize(.small)
                         .tint(Color.brandGreen)
+                        .disabled(chat.isStreaming || chat.isSelectedModelPreparing)
                 }
                 Button {
-                    chat.errorBanner = nil
+                    chat.dismissErrorBanner()
                 } label: {
                     Image(systemName: "xmark")
                 }

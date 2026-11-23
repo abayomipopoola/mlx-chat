@@ -160,7 +160,9 @@ final class DemoRecordingUITests: MLXUITestCase {
         captureWindow(named: "01-picker-apple")
 
         // 02 — the SSD model chosen, still loading into RAM.
-        launchCapture(extraArguments: ssdOrnithArguments + ["--fake-model-loading"])
+        launchCapture(extraArguments: ssdOrnithArguments + [
+            "--fake-loading-model", "streamed-moe/ornith-1.5-35b-a3b-4bit",
+        ])
         XCTAssertTrue(app.staticTexts["What can I help with?"].waitForExistence(timeout: 8))
         hold(1.0)
         captureWindow(named: "02-loading")

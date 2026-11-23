@@ -50,7 +50,21 @@ enum WindowOnScreenNudge {
         }
     }
 
+    static func clampedFrame(_ frame: NSRect, within visible: NSRect) -> NSRect {
+        var next = frame
+        next.size.width = min(next.size.width, visible.width)
+        next.size.height = min(next.size.height, visible.height)
+        next.origin.x = visible.midX - next.width / 2
+        next.origin.y = visible.midY - next.height / 2
+        if next.maxX > visible.maxX { next.origin.x = visible.maxX - next.width }
+        if next.maxY > visible.maxY { next.origin.y = visible.maxY - next.height }
+        if next.minX < visible.minX { next.origin.x = visible.minX }
+        if next.minY < visible.minY { next.origin.y = visible.minY }
+        return next
+    }
+
     static func moveOnScreen(_ window: NSWindow) {
+        guard window.isVisible, !window.isMiniaturized, !(window is NSPanel) else { return }
         let frame = window.frame
         guard frame.width >= 400, frame.height >= 400 else { return }
         let onAScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
@@ -60,13 +74,7 @@ enum WindowOnScreenNudge {
             ?? NSScreen.screens.first)?.visibleFrame
         else { return }
 
-        var next = frame
-        next.origin.x = visible.midX - next.width / 2
-        next.origin.y = visible.midY - next.height / 2
-        if next.maxX > visible.maxX { next.origin.x = visible.maxX - next.width }
-        if next.maxY > visible.maxY { next.origin.y = visible.maxY - next.height }
-        if next.minX < visible.minX { next.origin.x = visible.minX }
-        if next.minY < visible.minY { next.origin.y = visible.minY }
+        let next = clampedFrame(frame, within: visible)
         window.setFrame(next, display: true)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

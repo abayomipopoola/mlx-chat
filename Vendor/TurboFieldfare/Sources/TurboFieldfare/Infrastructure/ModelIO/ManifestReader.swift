@@ -399,7 +399,17 @@ public enum ManifestReader {
         try check("tieWordEmbeddings",   a.tieWordEmbeddings,   e.tieWordEmbeddings)
         try check("attentionKEqV",       a.attentionKEqV,       e.attentionKEqV)
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
-        let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
+        var actualMask: [UInt8] = []
+        actualMask.reserveCapacity(a.fullAttentionLayerMask.count)
+        for raw in a.fullAttentionLayerMask {
+            guard let byte = UInt8(exactly: raw) else {
+                throw ModelError.archMismatch(
+                    field: "fullAttentionLayerMask",
+                    expected: "0...255",
+                    actual: "\(raw)")
+            }
+            actualMask.append(byte)
+        }
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)

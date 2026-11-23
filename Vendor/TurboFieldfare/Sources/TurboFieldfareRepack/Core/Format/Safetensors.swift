@@ -43,10 +43,44 @@ enum Safetensors {
         return try parseHeaderBytes(path: path, fileSize: fileSize, headerBytes: data)
     }
 
+    private static func strictUInt64(_ raw: Any) -> UInt64? {
+        if let number = raw as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return nil
+            }
+            let objCType = String(cString: number.objCType)
+            if objCType == "f" || objCType == "d" {
+                let d = number.doubleValue
+                guard d.isFinite, d >= 0, d.rounded(.towardZero) == d,
+                      d < Double(UInt64.max) else {
+                    return nil
+                }
+                return UInt64(d)
+            }
+            if number.int64Value < 0 {
+                // Distinguish negative signed integers from unsigned > Int64.max.
+                if objCType == "Q" || objCType == "L" || objCType == "I"
+                    || objCType == "S" || objCType == "C" {
+                    return number.uint64Value
+                }
+                return nil
+            }
+            return number.uint64Value
+        }
+        if let intVal = raw as? Int {
+            guard intVal >= 0 else { return nil }
+            return UInt64(intVal)
+        }
+        return nil
+    }
+
     static func parseHeaderBytes(path: String,
                                         fileSize: UInt64,
                                         headerBytes data: Data) throws -> Header {
         let headerSize = UInt64(data.count)
+        guard fileSize >= 8 else {
+            throw RepackError.safetensorsHeaderTooLarge(path: path, size: headerSize)
+        }
         if headerSize > maxHeaderBytes || headerSize > fileSize - 8 {
             throw RepackError.safetensorsHeaderTooLarge(path: path, size: headerSize)
         }
@@ -83,32 +117,44 @@ enum Safetensors {
                                                            detail: "entry for \(name) has no shape")
             }
             var shapeU64: [UInt64] = try shape.map { e in
-                if let n = e as? NSNumber { return n.uint64Value }
-                if let n = e as? Int { return UInt64(n) }
-                throw RepackError.safetensorsHeaderInvalid(path: path,
-                                                           detail: "entry for \(name) has non-integer shape entry")
+                guard let dim = strictUInt64(e) else {
+                    throw RepackError.safetensorsHeaderInvalid(path: path,
+                                                               detail: "entry for \(name) has invalid shape entry")
+                }
+                return dim
             }
             guard let offs = entry["data_offsets"] as? [Any], offs.count == 2,
-                  let begin = (offs[0] as? NSNumber)?.uint64Value ?? (offs[0] as? Int).map({ UInt64($0) }),
-                  let end   = (offs[1] as? NSNumber)?.uint64Value ?? (offs[1] as? Int).map({ UInt64($0) })
+                  let begin = strictUInt64(offs[0]),
+                  let end   = strictUInt64(offs[1]),
+                  end >= begin
             else {
                 throw RepackError.safetensorsHeaderInvalid(path: path,
                                                            detail: "entry for \(name) has bad data_offsets")
             }
-            let abs = payloadBase + begin
+            let (abs, absOverflow) = payloadBase.addingReportingOverflow(begin)
             let size = end - begin
-            let endAbs = abs + size
-            if endAbs > fileSize {
+            let (endAbs, endOverflow) = abs.addingReportingOverflow(size)
+            if absOverflow || endOverflow || endAbs > fileSize {
                 throw RepackError.safetensorsTensorOutOfRange(path: path, name: name,
-                                                              end: endAbs, fileSize: fileSize)
+                                                              end: endOverflow ? UInt64.max : endAbs,
+                                                              fileSize: fileSize)
             }
             // MLX writes affine weights as raw bytes (U8) of the little-endian
             // uint32 packing. Fold each 4 bytes back into one U32 so the
             // planner's word-shaped logical dims stay correct. The byte
             // check uses the stored width, before that fold.
             let storedBytes: UInt64 = storedAsBytes ? 1 : UInt64(dtype.elementBytes)
-            let storedElements = shapeU64.reduce(UInt64(1), *)
-            if storedElements * storedBytes != size {
+            var storedElements: UInt64 = 1
+            for dim in shapeU64 {
+                let (next, overflow) = storedElements.multipliedReportingOverflow(by: dim)
+                if overflow {
+                    throw RepackError.safetensorsHeaderInvalid(path: path,
+                                                               detail: "shape product overflows UInt64 for \(name)")
+                }
+                storedElements = next
+            }
+            let (expectedBytes, byteOverflow) = storedElements.multipliedReportingOverflow(by: storedBytes)
+            if byteOverflow || expectedBytes != size {
                 throw RepackError.shapeMismatch(name: name,
                                                 detail: "shape product \(storedElements)*\(storedBytes) != size \(size)")
             }
@@ -122,8 +168,17 @@ enum Safetensors {
                 shapeU64[shapeU64.count - 1] = last / 4
             }
             let elemBytes = UInt64(dtype.elementBytes)
-            let elements = shapeU64.reduce(UInt64(1), *)
-            if elements * elemBytes != size {
+            var elements: UInt64 = 1
+            for dim in shapeU64 {
+                let (next, overflow) = elements.multipliedReportingOverflow(by: dim)
+                if overflow {
+                    throw RepackError.safetensorsHeaderInvalid(path: path,
+                                                               detail: "logical shape product overflows UInt64 for \(name)")
+                }
+                elements = next
+            }
+            let (logicalBytes, logicalOverflow) = elements.multipliedReportingOverflow(by: elemBytes)
+            if logicalOverflow || logicalBytes != size {
                 throw RepackError.shapeMismatch(name: name,
                                                 detail: "shape product \(elements)*\(elemBytes) != size \(size)")
             }

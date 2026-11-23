@@ -103,6 +103,7 @@ final class StreamedModelInstaller: @unchecked Sendable {
     private let helperURL: URL?
     private let processLock = NSLock()
     private var runningProcess: Process?
+    private var isCancelled = false
 
     init(helperURL: URL? = StreamedModelInstaller.bundledHelperURL()) {
         self.helperURL = helperURL
@@ -152,7 +153,10 @@ final class StreamedModelInstaller: @unchecked Sendable {
             }
         }
 
-        if variant.architecture == .gemma4 {
+        if Self.shouldInstallVisionCompanion(
+            architecture: variant.architecture,
+            visionCompanionPresent: StreamedMoEInstall.visionCompanionLooksPresent(
+                beside: outputDirectory)) {
             try await installVisionCompanion(
                 helperURL: helperURL,
                 variant: variant,
@@ -169,6 +173,13 @@ final class StreamedModelInstaller: @unchecked Sendable {
             downloadedBytes: readyBytes,
             totalBytes: readyBytes,
             isVision: companionOnly))
+    }
+
+    static func shouldInstallVisionCompanion(
+        architecture: StreamedMoEArchitecture,
+        visionCompanionPresent: Bool
+    ) -> Bool {
+        architecture == .gemma4 && !visionCompanionPresent
     }
 
     private func installVisionCompanion(
@@ -271,9 +282,10 @@ final class StreamedModelInstaller: @unchecked Sendable {
     }
 
     func cancel() {
-        processLock.lock()
-        let process = runningProcess
-        processLock.unlock()
+        let process: Process? = processLock.withLock {
+            isCancelled = true
+            return runningProcess
+        }
         if process?.isRunning == true { process?.terminate() }
     }
 
@@ -306,7 +318,7 @@ final class StreamedModelInstaller: @unchecked Sendable {
             isVision: isVision)
     }
 
-    private func execute(helperURL: URL, arguments: [String]) async throws {
+    func execute(helperURL: URL, arguments: [String]) async throws {
         let process = Process()
         let standardError = Pipe()
         let errorTail = ErrorTail()
@@ -314,13 +326,6 @@ final class StreamedModelInstaller: @unchecked Sendable {
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = standardError
-        standardError.fileHandleForReading.readabilityHandler = { handle in
-            errorTail.append(handle.availableData)
-        }
-
-        processLock.withLock {
-            runningProcess = process
-        }
 
         defer {
             processLock.withLock {
@@ -329,11 +334,21 @@ final class StreamedModelInstaller: @unchecked Sendable {
         }
 
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                process.terminationHandler = { completed in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                process.terminationHandler = { [weak self] completed in
                     standardError.fileHandleForReading.readabilityHandler = nil
                     errorTail.append(
                         standardError.fileHandleForReading.readDataToEndOfFile())
+                    let cancelled: Bool
+                    if let self {
+                        cancelled = self.processLock.withLock { self.isCancelled }
+                    } else {
+                        cancelled = false
+                    }
+                    if cancelled || Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
                     let errorText = errorTail.text()
                     if completed.terminationStatus == 0 {
                         continuation.resume()
@@ -342,10 +357,26 @@ final class StreamedModelInstaller: @unchecked Sendable {
                             StreamedModelInstallerError.helperFailed(errorText))
                     }
                 }
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
+                let launchError: Error? = processLock.withLock { () -> Error? in
+                    if isCancelled || Task.isCancelled {
+                        return CancellationError()
+                    }
+                    standardError.fileHandleForReading.readabilityHandler = { handle in
+                        errorTail.append(handle.availableData)
+                    }
+                    runningProcess = process
+                    do {
+                        try process.run()
+                        return nil
+                    } catch {
+                        standardError.fileHandleForReading.readabilityHandler = nil
+                        runningProcess = nil
+                        return error
+                    }
+                }
+                if let launchError {
+                    process.terminationHandler = nil
+                    continuation.resume(throwing: launchError)
                 }
             }
             try Task.checkCancellation()

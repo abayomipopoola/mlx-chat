@@ -55,6 +55,10 @@ public struct GenerationConfig: Sendable {
             throw GeneratorError.invalidGenerationConfig(
                 "topP below one requires topK; full-vocabulary nucleus sampling is not implemented")
         }
+        guard repetitionPenalty.isFinite, repetitionPenalty > 0 else {
+            throw GeneratorError.invalidGenerationConfig(
+                "repetitionPenalty must be finite and greater than zero")
+        }
     }
 
 }

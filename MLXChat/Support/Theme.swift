@@ -37,14 +37,9 @@ extension Color {
     static let brandGreen = Color(lightHex: 0x3E9979, darkHex: 0x4FB892)
     /// Composer send button: deeper green in dark mode so it sits with the theme.
     static let sendGreen = Color(lightHex: 0x3E9979, darkHex: 0x2F8563)
-    /// Hero badge gradient endpoints.
-    static let brandGradientTop = Color(lightHex: 0x42A484, darkHex: 0x4FB892)
-    static let brandGradientBottom = Color(lightHex: 0x2E8E68, darkHex: 0x35986F)
     /// Status green used by "Ready"-style badges.
     static let statusGreen = Color(lightHex: 0x59C05F, darkHex: 0x6ECC74)
     static let statusGreenBackground = Color(lightHex: 0xE4F5E6, darkHex: 0x59C05F, darkAlpha: 0.18)
-    /// Soft halo behind the hero badge.
-    static let mintHalo = Color(lightHex: 0xE3F0EC, darkHex: 0x4FB892, darkAlpha: 0.12)
     /// Flat sidebar pane and gray capsules (model picker).
     static let sidebarBackground = Color(lightHex: 0xF6F6F7, darkHex: 0x18181A)
     /// Detail pane surface.
@@ -96,9 +91,6 @@ enum Studio {
     static let radiusSuggestion: CGFloat = 14
     static let radiusComposer: CGFloat = 24
     static let radiusField: CGFloat = 8
-    static let heroBadgeSize: CGFloat = 145
-    static let heroBadgeRadius: CGFloat = 32
-    static let haloSize: CGFloat = 330
     /// Composer send and attach controls share this hit target.
     static let sendButtonSize: CGFloat = 28
     static let headerButtonSize: CGFloat = 28
@@ -119,9 +111,6 @@ enum Studio {
     static let sidebarListFade: CGFloat = 36
     /// Gap above the Settings row.
     static let sidebarSettingsTop: CGFloat = 20
-    /// Sidebar top inset: aligns "New chat" with the bottom edge of the detail
-    /// pane's fixed header (16 top padding + ~28 header control + 4 bottom).
-    static let trafficLightInset: CGFloat = 48
     /// Width of the three traffic lights plus their leading window inset.
     static let trafficLightClusterWidth: CGFloat = 66
     /// Leading inset after the green traffic light (cluster + doubled gap).
@@ -148,9 +137,10 @@ enum Studio {
         }
         var seen = Set(cascade.compactMap(\.postscriptName))
         for name in ["Apple Symbols", "STIX Two Math", "Apple Color Emoji"] {
-            guard NSFont(name: name, size: size) != nil else { continue }
-            guard seen.insert(name).inserted else { continue }
-            cascade.append(NSFontDescriptor(name: name, size: size))
+            guard let fallback = NSFont(name: name, size: size) else { continue }
+            let key = fallback.fontDescriptor.postscriptName ?? name
+            guard seen.insert(key).inserted else { continue }
+            cascade.append(fallback.fontDescriptor)
         }
         let descriptor = base.fontDescriptor.addingAttributes([
             .cascadeList: cascade,
@@ -237,19 +227,11 @@ enum Studio {
     }
 
     static let titleXL = sans(28, weight: .semibold)
-    static let heroSubtitle = sans(18)
     static let pageTitle = sans(17, weight: .bold)
     static let rowTitle = sans(15, weight: .semibold)
     static let body13 = sans(13)
     static let body14Semibold = sans(14, weight: .semibold)
-    static let cardCaption = sans(12.5)
     static let composerText = chatSans(chatFontSize)
-    static let chatMono = Font(
-        cascadedNSFont(
-            base: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-            size: 12
-        ) as CTFont
-    )
     static let caption13 = sans(13)
     static let sectionLabel = sans(12, weight: .semibold)
 
@@ -307,15 +289,70 @@ extension View {
             .contentShape(Capsule())
     }
 
+    /// Balances NSCursor push/pop across hover, disable, and view teardown.
+    func balancedCursor(_ cursor: NSCursor, enabled: Bool = true) -> some View {
+        modifier(BalancedCursorModifier(cursor: cursor, enabled: enabled))
+    }
+
     /// Pointing hand while the pointer is over an enabled control.
     func pointingHandCursor(enabled: Bool = true) -> some View {
-        onHover { inside in
-            if inside && enabled {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
+        balancedCursor(.pointingHand, enabled: enabled)
+    }
+}
+
+struct CursorPushTracker {
+    private(set) var isPushed = false
+
+    mutating func setHovering(
+        _ inside: Bool,
+        enabled: Bool,
+        push: () -> Void,
+        pop: () -> Void
+    ) {
+        let shouldBePushed = inside && enabled
+        if shouldBePushed, !isPushed {
+            push()
+            isPushed = true
+        } else if !shouldBePushed, isPushed {
+            pop()
+            isPushed = false
         }
+    }
+
+    mutating func popIfNeeded(pop: () -> Void) {
+        guard isPushed else { return }
+        pop()
+        isPushed = false
+    }
+}
+
+private struct BalancedCursorModifier: ViewModifier {
+    let cursor: NSCursor
+    let enabled: Bool
+    @State private var tracker = CursorPushTracker()
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                hovering = inside
+                tracker.setHovering(
+                    inside,
+                    enabled: enabled,
+                    push: { cursor.push() },
+                    pop: { NSCursor.pop() })
+            }
+            .onChange(of: enabled) { _, newValue in
+                tracker.setHovering(
+                    hovering,
+                    enabled: newValue,
+                    push: { cursor.push() },
+                    pop: { NSCursor.pop() })
+            }
+            .onDisappear {
+                hovering = false
+                tracker.popIfNeeded { NSCursor.pop() }
+            }
     }
 }
 
@@ -372,8 +409,6 @@ struct StudioSearchField: View {
     var verticalPadding: CGFloat = 7
     /// Sidebar keeps 8; Manage Models uses a roomier inset.
     var horizontalPadding: CGFloat = 8
-    /// Optional accent ring around the pill (Manage Models brand-green ring).
-    var ringColor: Color? = nil
     /// When true, the ring only appears while the field is focused (sidebar).
     var ringOnFocusOnly: Bool = false
     /// Optional accessibility id for the inner TextField (UI tests).
@@ -385,6 +420,8 @@ struct StudioSearchField: View {
     @State private var fieldFrame: CGRect = .zero
     @State private var clickMonitor: Any?
     @State private var clickOutsideContext = SearchFieldClickOutsideContext()
+    @State private var didClearLaunchFocus = false
+    @State private var launchFocusTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -408,24 +445,35 @@ struct StudioSearchField: View {
         .onChange(of: focused) { _, isFocused in
             syncClickOutsideMonitor(isFocused: isFocused)
         }
+        .onChange(of: text) { _, newValue in
+            if !newValue.isEmpty {
+                launchFocusTask?.cancel()
+                launchFocusTask = nil
+            }
+        }
         .onDisappear {
+            launchFocusTask?.cancel()
+            launchFocusTask = nil
             removeClickOutsideMonitor()
         }
         .onAppear {
             // AppKit makes the first key view (this field) first responder when
-            // the window keys — AFTER onAppear. The ring is a clicked-into
-            // indicator, so clear the launch auto-focus on a short delay.
-            if ringOnFocusOnly {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { focused = false }
+            // the window keys — AFTER onAppear. Clear launch auto-focus once,
+            // and cancel if the user starts typing first.
+            if ringOnFocusOnly, !didClearLaunchFocus {
+                didClearLaunchFocus = true
+                launchFocusTask?.cancel()
+                launchFocusTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard !Task.isCancelled, text.isEmpty else { return }
+                    focused = false
+                }
             }
         }
         .overlay {
             if ringOnFocusOnly, focused {
                 RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1)
-            } else if let ringColor, !ringOnFocusOnly {
-                RoundedRectangle(cornerRadius: Studio.radiusComposer, style: .continuous)
-                    .strokeBorder(ringColor, lineWidth: 1)
             }
         }
     }
@@ -535,33 +583,5 @@ struct StudioPageHeader: View {
             .padding(.horizontal, 24)
             .padding(.top, 16)
             .padding(.bottom, 12)
-    }
-}
-
-/// Green-gradient rounded square with the large + small sparkle pair
-/// (MLX Studio's hero mark).
-struct HeroBadge: View {
-    var size: CGFloat = Studio.heroBadgeSize
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * Studio.heroBadgeRadius / Studio.heroBadgeSize,
-                         style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [.brandGradientTop, .brandGradientBottom],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing))
-            .frame(width: size, height: size)
-            .overlay(
-                ZStack {
-                    Image(systemName: "sparkle")
-                        .font(.system(size: size * 0.40, weight: .medium))
-                        .foregroundStyle(.white)
-                        .offset(x: -size * 0.02, y: size * 0.03)
-                    Image(systemName: "sparkle")
-                        .font(.system(size: size * 0.13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .offset(x: size * 0.21, y: -size * 0.20)
-                })
     }
 }

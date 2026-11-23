@@ -62,11 +62,10 @@ public enum VisionPackVerifier {
         let manifest = try GTurboVisionManifestCodec.decode(manifestData)
         let receipt = try GTurboVisionReceiptCodec.decode(receiptData)
 
-        let textManifestPath = textModelDirectory.standardizedFileURL
-            .appendingPathComponent(GTurboVisionFormatV1.manifestFile).path
-        let textManifestData = try Posix.readBoundedData(
-            textManifestPath,
-            maximumBytes: GTurboVisionFormatV1.metadataMaxBytes)
+        let textAccess = try GTurboDirectoryAccess(rootPath: textModelDirectory.standardizedFileURL.path)
+        let textManifestData = try textAccess.readMetadata(
+            GTurboVisionFormatV1.manifestFile,
+            maxBytes: GTurboVisionFormatV1.metadataMaxBytes)
         let textManifest = try GTurboManifestCodec.decode(textManifestData)
         guard let textSource = textManifest.sourceSnapshotHash,
               manifest.compatibleTextSourceSnapshotHash == textSource else {
@@ -99,34 +98,60 @@ public enum VisionPackVerifier {
                 detail: "vision companion receipt source binding mismatch")
         }
 
-        let totalBytes = manifest.files.reduce(UInt64(0)) { total, entry in
-            verifyWeights || entry.key != GTurboVisionFormatV1.weightsFile
-                ? total + entry.value.size : total
+        guard let weightsEntry = manifest.files[GTurboVisionFormatV1.weightsFile] else {
+            throw RepackError.configurationInvalid(
+                detail: "vision manifest missing \(GTurboVisionFormatV1.weightsFile)")
         }
+
+        var totalBytes: UInt64 = 0
+        for (key, entry) in manifest.files
+            where verifyWeights || key != GTurboVisionFormatV1.weightsFile {
+            let sum = totalBytes.addingReportingOverflow(entry.size)
+            guard !sum.overflow else {
+                throw RepackError.configurationInvalid(
+                    detail: "vision manifest byte total overflowed")
+            }
+            totalBytes = sum.partialValue
+        }
+
         var hashedBytes: UInt64 = 0
-        for (relativePath, expected) in manifest.files {
-            let actualSize = try access.fileSize(relativePath)
-            guard actualSize == expected.size else {
-                throw RepackError.configurationInvalid(
-                    detail: "\(relativePath) size \(actualSize) != \(expected.size)")
-            }
-            guard receipt.files[relativePath] == expected else {
-                throw RepackError.configurationInvalid(
-                    detail: "\(relativePath) receipt mismatch")
-            }
-            if verifyWeights || relativePath != GTurboVisionFormatV1.weightsFile {
-                let path = directory.appendingPathComponent(relativePath).path
-                // Reported against the total the manifest declares, so the
-                // caller can show a fraction rather than a bare spinner for the
-                // minutes this takes over ~1.5 GB.
-                let alreadyHashed = hashedBytes
-                let actualSHA = try Sha256Stream.hashFile(
-                    path: path, noCache: true, noFollow: true)
-                _ = onHashProgress.map { report in
-                    try? report(alreadyHashed + actualSize, totalBytes)
+        for relativePath in manifest.files.keys.sorted() {
+            guard let expected = manifest.files[relativePath] else { continue }
+            let fd = try access.openFile(relativePath)
+            let actualSize: UInt64
+            let actualSHA: String?
+            do {
+                actualSize = try access.fileSize(fileDescriptor: fd, relativePath: relativePath)
+                guard actualSize == expected.size else {
+                    throw RepackError.configurationInvalid(
+                        detail: "\(relativePath) size \(actualSize) != \(expected.size)")
                 }
-                hashedBytes = alreadyHashed + actualSize
-                guard actualSHA == expected.sha256.lowercased() else {
+                guard receipt.files[relativePath] == expected else {
+                    throw RepackError.configurationInvalid(
+                        detail: "\(relativePath) receipt mismatch")
+                }
+                if verifyWeights || relativePath != GTurboVisionFormatV1.weightsFile {
+                    actualSHA = try access.hash(
+                        fileDescriptor: fd,
+                        relativePath: relativePath,
+                        noCache: true)
+                } else {
+                    actualSHA = nil
+                }
+                close(fd)
+            } catch {
+                close(fd)
+                throw error
+            }
+            if let actualSHA {
+                let sum = hashedBytes.addingReportingOverflow(actualSize)
+                guard !sum.overflow else {
+                    throw RepackError.configurationInvalid(
+                        detail: "vision verified byte total overflowed")
+                }
+                hashedBytes = sum.partialValue
+                try onHashProgress?(hashedBytes, totalBytes)
+                guard actualSHA.lowercased() == expected.sha256.lowercased() else {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) hash mismatch")
                 }
@@ -140,7 +165,7 @@ public enum VisionPackVerifier {
         }
         return VisionPackVerification(
             manifestSha256: manifestSHA,
-            weightsBytes: manifest.files[GTurboVisionFormatV1.weightsFile]!.size,
+            weightsBytes: weightsEntry.size,
             sourceRevision: manifest.sourceRevision,
             sourceIndexSha256: manifest.sourceIndexSha256,
             compatibleTextManifestSha256: textManifestSHA)

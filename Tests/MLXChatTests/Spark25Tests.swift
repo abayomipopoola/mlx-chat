@@ -169,8 +169,8 @@ import Testing
         ]
         let base = try JSONDecoder().decode(BaseConfiguration.self, from: Self.json(config))
         let model = try await Self.makeModel()
-        try loadWeights(modelDirectory: directory, model: model,
-                        perLayerQuantization: base.perLayerQuantization)
+        try await loadWeights(modelDirectory: directory, model: model,
+                              perLayerQuantization: base.perLayerQuantization)
 
         let leaves = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
         #expect((leaves[sixBit] as? QuantizedLinear)?.bits == 6)

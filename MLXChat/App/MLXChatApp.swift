@@ -66,17 +66,21 @@ extension Notification.Name {
     static let focusComposer = Notification.Name("focusComposer")
 }
 
-/// Posts `.dismissHeaderDropdown` on every Esc keydown (event passes through
+/// Posts `.dismissHeaderDropdown` on every bare Esc keydown (event passes through
 /// untouched, so text fields and sheets keep their own Esc behavior). RootView
 /// closes an open dropdown, or else stops a reply in progress.
-private enum EscKeyMonitor {
+enum EscKeyMonitor {
     private static var installed = false
+
+    static func isBareEscapeKey(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
+        keyCode == 53 && modifiers.intersection(.deviceIndependentFlagsMask).isEmpty
+    }
 
     static func install() {
         guard !installed else { return }
         installed = true
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.keyCode == 53 {
+            if Self.isBareEscapeKey(keyCode: event.keyCode, modifiers: event.modifierFlags) {
                 NotificationCenter.default.post(name: .dismissHeaderDropdown, object: nil)
             }
             return event

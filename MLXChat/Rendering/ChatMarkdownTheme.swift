@@ -111,11 +111,17 @@ private func chatUserHeading(_ configuration: BlockConfiguration) -> some View {
 struct ChatCodeBlockView: View {
     let configuration: CodeBlockConfiguration
     @State private var copied = false
+    @State private var copyResetTask: Task<Void, Never>?
+
+    static func displayLanguage(for language: String?) -> String {
+        let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "code" : trimmed.lowercased()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(configuration.language?.lowercased() ?? "code")
+                Text(Self.displayLanguage(for: configuration.language))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -123,8 +129,10 @@ struct ChatCodeBlockView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(configuration.content, forType: .string)
                     copied = true
-                    Task {
+                    copyResetTask?.cancel()
+                    copyResetTask = Task {
                         try? await Task.sleep(for: .seconds(1.5))
+                        guard !Task.isCancelled else { return }
                         copied = false
                     }
                 } label: {
@@ -155,5 +163,9 @@ struct ChatCodeBlockView: View {
                 .stroke(Color.cardStroke, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .markdownMargin(top: .em(0.8), bottom: .em(0.8))
+        .onDisappear {
+            copyResetTask?.cancel()
+            copyResetTask = nil
+        }
     }
 }

@@ -9,16 +9,11 @@ struct ImportModelSheet: View {
     @State private var input = ""
     @State private var importError: String?
     @State private var importing = false
+    @State private var importTask: Task<Void, Never>?
     @FocusState private var repoFieldFocused: Bool
 
-    /// Accepts a bare repo id or a full Hugging Face URL.
-    private var normalizedRepoID: String {
-        Self.normalizeRepoID(input)
-    }
-
-    /// Cheap gate for the Import button — avoids full URL normalization per keystroke.
-    private var inputIsEmpty: Bool {
-        input.allSatisfy(\.isWhitespace)
+    static func canSubmit(input: String, importing: Bool) -> Bool {
+        !importing && !normalizeRepoID(input).isEmpty
     }
 
     var body: some View {
@@ -64,13 +59,17 @@ struct ImportModelSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") {
+                    importTask?.cancel()
+                    importTask = nil
+                    dismiss()
+                }
                     .keyboardShortcut(.cancelAction)
                 Button(importing ? "Importing…" : "Import") { runImport() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .tint(Color.brandGreen)
-                    .disabled(importing || inputIsEmpty)
+                    .disabled(!Self.canSubmit(input: input, importing: importing))
             }
             .padding(14)
         }
@@ -78,16 +77,33 @@ struct ImportModelSheet: View {
         .onAppear {
             repoFieldFocused = true
         }
+        .onDisappear {
+            importTask?.cancel()
+            importTask = nil
+        }
     }
 
     private func runImport() {
+        guard !importing else { return }
         let repo = Self.normalizeRepoID(input)
-        guard !repo.isEmpty, !importing else { return }
+        guard !repo.isEmpty else {
+            if !input.allSatisfy(\.isWhitespace) {
+                importError = "Enter a repo id like ModelAuthor/ModelName-MLX."
+            }
+            return
+        }
         importing = true
         importError = nil
-        Task {
+        importTask?.cancel()
+        importTask = Task {
             let error = await chat.modelStore.importModel(repoID: repo)
+            guard !Task.isCancelled else {
+                importing = false
+                importTask = nil
+                return
+            }
             importing = false
+            importTask = nil
             importError = error
             if error == nil { dismiss() }
         }

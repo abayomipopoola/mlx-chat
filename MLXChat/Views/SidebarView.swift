@@ -16,11 +16,26 @@ struct SidebarView: View {
     @State private var renameTarget: Conversation?
     @State private var renameText = ""
 
+    static func filterConversations<T>(
+        _ conversations: [T],
+        query: String,
+        hideHistory: Bool = ProcessInfo.processInfo.arguments.contains("--capture-hide-history"),
+        matches: (T, String) -> Bool
+    ) -> [T] {
+        if hideHistory { return [] }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return conversations }
+        return conversations.filter { matches($0, trimmed) }
+    }
+
+    static func canConfirmRename(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var filtered: [Conversation] {
-        if ProcessInfo.processInfo.arguments.contains("--capture-hide-history") {
-            return []
+        Self.filterConversations(conversations, query: searchText) {
+            ConversationStore.matches($0, query: $1)
         }
-        return conversations.filter { ConversationStore.matches($0, query: searchText) }
     }
 
     var body: some View {
@@ -52,14 +67,16 @@ struct SidebarView: View {
                 .padding(.bottom, 6)
 
             ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(filtered) { conversation in
-                        conversationRow(conversation)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    LazyVStack(spacing: 2) {
+                        ForEach(filtered) { conversation in
+                            conversationRow(conversation, now: context.date)
+                        }
                     }
+                    .padding(.horizontal, Studio.sidebarInset)
+                    .padding(.top, 2)
+                    .padding(.bottom, 6)
                 }
-                .padding(.horizontal, Studio.sidebarInset)
-                .padding(.top, 2)
-                .padding(.bottom, 6)
             }
             .accessibilityIdentifier("conversationList")
             .overlay(alignment: .bottom) {
@@ -90,11 +107,12 @@ struct SidebarView: View {
         )) {
             TextField("Title", text: $renameText)
             Button("Rename") {
-                if let target = renameTarget {
+                if Self.canConfirmRename(renameText), let target = renameTarget {
                     chat.conversationStore?.rename(target, to: renameText)
                 }
                 renameTarget = nil
             }
+            .disabled(!Self.canConfirmRename(renameText))
             Button("Cancel", role: .cancel) { renameTarget = nil }
         }
     }
@@ -107,12 +125,12 @@ struct SidebarView: View {
 
     /// Sub-minute (or clock-skew "future") intervals read as "in 0 seconds"
     /// from the numeric formatter; show a friendly label instead.
-    static func relativeLabel(for date: Date) -> String {
-        guard Date.now.timeIntervalSince(date) >= 60 else { return "just now" }
-        return relativeDate.localizedString(for: date, relativeTo: .now)
+    static func relativeLabel(for date: Date, relativeTo now: Date = .now) -> String {
+        guard now.timeIntervalSince(date) >= 60 else { return "just now" }
+        return relativeDate.localizedString(for: date, relativeTo: now)
     }
 
-    private func conversationRow(_ conversation: Conversation) -> some View {
+    private func conversationRow(_ conversation: Conversation, now: Date) -> some View {
         let selected = selectedConversationID == conversation.id
         return Button {
             selectedConversationID = conversation.id
@@ -123,7 +141,7 @@ struct SidebarView: View {
                     .font(Studio.mona(13))
                     .foregroundStyle(selected ? Color.primary : Color.sidebarTitle)
                     .lineLimit(1)
-                Text(Self.relativeLabel(for: conversation.updatedAt))
+                Text(Self.relativeLabel(for: conversation.updatedAt, relativeTo: now))
                     .font(Studio.sans(11))
                     .foregroundStyle(Color.sidebarMeta)
             }

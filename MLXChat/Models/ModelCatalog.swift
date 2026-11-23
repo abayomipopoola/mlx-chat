@@ -1,4 +1,5 @@
 import Foundation
+import MLXVLM
 
 /// A model the app can download or register and run. Standard MLX model IDs are
 /// Hugging Face repository IDs; streamed installs use a stable app-local ID.
@@ -14,6 +15,13 @@ struct CatalogModel: Identifiable, Hashable, Codable {
         /// TurboFieldfare's MoE runtime. Common weights stay resident; routed
         /// experts are fetched from a registered `.gturbo` directory.
         case streamedMoE
+        /// MLX-side SSD expert streaming directly from the shared MLX safetensors
+        /// download (common core resident in MLX, routed experts read via F_NOCACHE pread).
+        case mlxStreamed
+
+        var isSSDStreamed: Bool {
+            self == .streamedMoE || self == .mlxStreamed
+        }
     }
 
     let id: String
@@ -113,8 +121,21 @@ struct CatalogModel: Identifiable, Hashable, Codable {
     var huggingFaceRepoID: String { sourceRepoID ?? id }
 
     var hugginFaceURL: URL {
-        let suffix = sourceSubfolder.map { "/tree/main/\($0)" } ?? ""
-        return URL(string: "https://huggingface.co/\(huggingFaceRepoID)\(suffix)")!
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        var path = "/\(huggingFaceRepoID)"
+        if let sourceSubfolder, !sourceSubfolder.isEmpty {
+            path += "/tree/main/\(sourceSubfolder)"
+        }
+        components.path = path
+        if let url = components.url {
+            return url
+        }
+        var fallback = URLComponents()
+        fallback.scheme = "https"
+        fallback.host = "huggingface.co"
+        return fallback.url ?? URL(fileURLWithPath: "/")
     }
 
     /// Reasoning can be switched off per turn via the model's `enable_thinking`
@@ -124,18 +145,18 @@ struct CatalogModel: Identifiable, Hashable, Codable {
 
     var supportsThinkingToggle: Bool { thinking?.toggleable == true }
 
-    /// TurboFieldfare's FP16 KV cache uses the SSD runtime setting (4K–32K).
-    /// The model supports 256K, but exposing that full cache would defeat the
-    /// low-memory backend. Dense MLX models keep their existing limit.
+    /// SSD-streamed backends bound their KV cache via the SSD runtime setting (4K–32K)
+    /// so the shared core and expert cache stay within low-memory targets.
     var runtimeContextTokens: Int {
-        backend == .streamedMoE ? StreamedMoEInstall.runtimeContextTokens : ctxTokens
+        backend.isSSDStreamed ? StreamedMoEInstall.runtimeContextTokens : ctxTokens
     }
 
-    /// Disambiguates the ordinary MLX checkpoint from its separately repacked
-    /// SSD-streamed install in the compact chat picker.
+    /// Disambiguates the ordinary MLX checkpoint from its SSD-streamed sibling
+    /// in the compact chat picker.
     var pickerDisplayName: String {
-        if backend == .streamedMoE { return "SSD · \(displayName)" }
-        if StreamedMoEInstall.supportsSSDStreaming(sourceModelID: id) {
+        if backend.isSSDStreamed { return "SSD · \(displayName)" }
+        if StreamedMoEInstall.supportsSSDStreaming(sourceModelID: id)
+            || MLXStreamedInstall.supportsSSDStreaming(sourceModelID: id) {
             return "MLX · \(displayName)"
         }
         return displayName
@@ -170,6 +191,12 @@ struct ThinkingConfig: Hashable, Codable {
     static let gemmaChannel = ThinkingConfig(
         open: "<|channel>thought", close: "<channel|>",
         startsInside: false, toggleable: true)
+
+    /// Inkling 2 message frames: `<|content_thinking|> … <|end_message|>`.
+    /// Minimum reasoning effort does not disable reasoning on Inkling 2 Mini.
+    static let inklingFrames = ThinkingConfig(
+        open: "<|content_thinking|>", close: "<|end_message|>",
+        startsInside: false, toggleable: false)
 }
 
 /// A curated group of related models, shown as one tappable card in Manage Models.
@@ -193,6 +220,10 @@ struct ModelFamily: Identifiable {
 enum ModelCatalog {
     /// Display order of the family cards in Manage Models.
     static let families: [ModelFamily] = [
+        ModelFamily(
+            id: "inkling2", name: "Inkling 2", icon: "sparkles",
+            blurb: "Thinking Machines' looped MoE model with 1M context, vision, and always-on reasoning. Inkling 2 Mini 4-bit runs in memory through MLX or streams routed experts from SSD.",
+            badges: [.new, .thinking, .vision]),
         ModelFamily(
             id: "flint", name: "Flint", icon: "chevron.left.forwardslash.chevron.right",
             blurb: "Recursive's 40B coding model with about 2.5B active parameters. Experts stream from SSD; the in-memory MLX loader does not include this architecture.",
@@ -263,6 +294,7 @@ enum ModelCatalog {
     static func familyID(for model: CatalogModel) -> String {
         if model.category == .imported { return "imported" }
         let name = model.displayName
+        if name.hasPrefix("Inkling") { return "inkling2" }
         if name.hasPrefix("Flint") { return "flint" }
         if name.hasPrefix("LFM2.5") { return "lfm25" }
         if name.hasPrefix("Qwen3.6") { return "qwen36" }
@@ -281,8 +313,31 @@ enum ModelCatalog {
     }
 
     /// Curated entries. Repos, sizes, `max_position_embeddings`, and MLX architecture
-    /// support (LLMTypeRegistry at mlx-swift-lm 3.31.4) verified against HF/source.
+    /// support (LLMTypeRegistry / VLMTypeRegistry at mlx-swift-lm 3.33.0) verified against HF/source.
     static let models: [CatalogModel] = [
+        CatalogModel(
+            id: MLXStreamedInstall.inkling2Mini4Bit.sourceModelID, displayName: "Inkling 2 Mini 4-bit",
+            sizeGB: 17.31, ctxTokens: 1_048_576, quantLabel: "4-bit MoE", category: .general,
+            blurb: "Looped MoE with NVFP4/MXFP8 experts and 4-bit dense layers. Use standard MLX or enable SSD expert streaming on the same download.",
+            extraEOSTokens: ["<|content_model_end_sampling|>"],
+            thinking: .inklingFrames,
+            supportsVision: true),
+        CatalogModel(
+            id: MLXStreamedInstall.inkling2Mini4Bit.modelID, displayName: "Inkling 2 Mini 4-bit",
+            sizeGB: 17.31, ctxTokens: 1_048_576, quantLabel: "4-bit · SSD", category: .general,
+            blurb: "Streams Inkling 2 Mini's routed experts from the shared MLX download using a 4K–32K context cache.",
+            extraEOSTokens: ["<|content_model_end_sampling|>"],
+            thinking: .inklingFrames,
+            supportsVision: true,
+            backend: .mlxStreamed,
+            sourceRepoID: MLXStreamedInstall.inkling2Mini4Bit.sourceModelID),
+        CatalogModel(
+            id: "thinkingmachines/Inkling-2-Mini", displayName: "Inkling 2 Mini NVFP4",
+            sizeGB: 19.53, ctxTokens: 1_048_576, quantLabel: "NVFP4 · Thinking Machines", category: .general,
+            blurb: "Official Thinking Machines checkpoint with BF16 dense layers, NVFP4/MXFP8 experts, vision, and 1M context.",
+            extraEOSTokens: ["<|content_model_end_sampling|>"],
+            thinking: .inklingFrames,
+            supportsVision: true),
         CatalogModel(
             id: "LiquidAI/LFM2.5-2.6B-MLX", displayName: "LFM2.5 2.6B 4-bit",
             sizeGB: 1.47, ctxTokens: 131_072, quantLabel: "4-bit · LiquidAI", category: .general,
@@ -512,8 +567,11 @@ enum ModelCatalog {
             extraEOSTokens: [], thinking: .thinkTags(toggleable: false)),
     ]
 
+    private static let modelsByID: [String: CatalogModel] = Dictionary(
+        uniqueKeysWithValues: models.map { ($0.id, $0) })
+
     static func model(for id: String) -> CatalogModel? {
-        models.first { $0.id == id }
+        modelsByID[id]
     }
 
     /// Fallback entry shape for user-imported repos. Known imported models are
@@ -534,12 +592,13 @@ enum ModelCatalog {
     /// families is added after the model was originally imported.
     static func applyingKnownCapabilities(to model: CatalogModel, configJSON: Data? = nil) -> CatalogModel {
         let id = model.id.lowercased()
+        let configCtx = model.category == .imported ? configContextTokens(from: configJSON) : nil
         let contextTokens: Int
         let extraEOSTokens: Set<String>
-        let thinking: ThinkingConfig
+        let thinking: ThinkingConfig?
 
         if id == "prism-ml/ternary-bonsai-27b-mlx-2bit" {
-            contextTokens = 262_144
+            contextTokens = max(262_144, configCtx ?? 0)
             extraEOSTokens = ["<|im_end|>"]
             thinking = .thinkTags(startsInside: true, toggleable: true)
         } else if isOrnithQwenFamily(id) {
@@ -547,16 +606,35 @@ enum ModelCatalog {
             // 35B/397B). The chat template pre-opens <think>, so only </think>
             // appears in the decoded stream before the visible answer. The
             // dense 9B checkpoint is not a streamed-MoE source.
-            contextTokens = 262_144
+            contextTokens = max(262_144, configCtx ?? 0)
             extraEOSTokens = ["<|im_end|>", "<|endoftext|>"]
             thinking = .thinkTags(startsInside: true, toggleable: true)
+        } else if isInkling2Family(id) {
+            contextTokens = max(model.ctxTokens, 1_048_576)
+            extraEOSTokens = ["<|content_model_end_sampling|>"]
+            thinking = .inklingFrames
         } else if let type = modelType(from: configJSON),
                   let inferred = thinkingConfig(forModelType: type) {
             let isPrism = type == PrismHadamardQwen35.modelType
-            let usesLongContext = isPrism || type.hasPrefix("qwen3_5") || type.hasPrefix("gemma4")
-            contextTokens = usesLongContext ? max(model.ctxTokens, 262_144) : model.ctxTokens
-            extraEOSTokens = isPrism ? ["<|im_end|>", "<|endoftext|>"] : ["<|im_end|>"]
+            let isInkling = Inkling2.modelTypes.contains(type)
+            let isGemma4 = type.hasPrefix("gemma4")
+            let usesLongContext = isPrism || type.hasPrefix("qwen3_5") || isGemma4
+            if isInkling {
+                contextTokens = max(model.ctxTokens, 1_048_576)
+                extraEOSTokens = ["<|content_model_end_sampling|>"]
+            } else if isGemma4 {
+                contextTokens = max(max(model.ctxTokens, 262_144), configCtx ?? 0)
+                extraEOSTokens = ["<turn|>"]
+            } else {
+                let baseContext = usesLongContext ? max(model.ctxTokens, 262_144) : model.ctxTokens
+                contextTokens = max(baseContext, configCtx ?? 0)
+                extraEOSTokens = isPrism ? ["<|im_end|>", "<|endoftext|>"] : ["<|im_end|>"]
+            }
             thinking = inferred
+        } else if let configCtx, configCtx > model.ctxTokens {
+            contextTokens = configCtx
+            extraEOSTokens = []
+            thinking = model.thinking
         } else {
             return model
         }
@@ -584,6 +662,10 @@ enum ModelCatalog {
         return lower.contains("/ornith-1.0") || lower.contains("/ornith-1.5")
     }
 
+    static func isInkling2Family(_ id: String) -> Bool {
+        id.lowercased().contains("/inkling-2")
+    }
+
     static func thinkingConfig(forModelType type: String) -> ThinkingConfig? {
         switch type {
         // LFM3 text models and Spark open <think> in the template; LFM3-Omni is
@@ -595,6 +677,8 @@ enum ModelCatalog {
             return .thinkTags(toggleable: true)
         case "gemma4", "gemma4_text", "gemma4_unified":
             return .gemmaChannel
+        case "inkling2", "inkling2_loop":
+            return .inklingFrames
         default:
             return nil
         }
@@ -608,5 +692,23 @@ enum ModelCatalog {
         else { return nil }
         let trimmed = type.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func configContextTokens(from configJSON: Data?) -> Int? {
+        guard let configJSON,
+              let object = try? JSONSerialization.jsonObject(with: configJSON),
+              let dict = object as? [String: Any]
+        else { return nil }
+        let raw = dict["max_position_embeddings"]
+            ?? (dict["text_config"] as? [String: Any])?["max_position_embeddings"]
+        guard !(raw is Bool),
+              let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID()
+        else { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double.rounded(.towardZero) == double,
+              let value = Int(exactly: double), value > 0
+        else { return nil }
+        return min(value, 1_048_576)
     }
 }

@@ -1,13 +1,21 @@
 import AppKit
-import SwiftData
 import SwiftUI
 
 /// Detail pane: welcome state or transcript, plus the composer and artifact inspector.
 struct ChatScreen: View {
     @Environment(ChatController.self) private var chat
     let conversation: Conversation?
+    var canFocusComposer: Bool = true
     /// Creates and selects a conversation lazily on first send.
     let onCreateConversation: () -> Conversation?
+
+    static func isStreamingConversation(
+        streamingMessageID: UUID?,
+        messageIDs: [UUID]
+    ) -> Bool {
+        guard let streamingMessageID else { return false }
+        return messageIDs.contains(streamingMessageID)
+    }
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
@@ -28,7 +36,11 @@ struct ChatScreen: View {
                 transcript(messages: messages)
             }
             EngineReadinessNotice(selectedModelID: chat.selectedModelID)
-            ComposerView(draft: $draft, focused: $composerFocused) { text, attachments in
+            ComposerView(
+                draft: $draft,
+                focused: $composerFocused,
+                conversationID: conversation?.id
+            ) { text, attachments in
                 send(text, attachments: attachments)
             }
         }
@@ -80,19 +92,21 @@ struct ChatScreen: View {
             userPausedAutoScroll = false
             userIsScrolling = false
             draft = ""
-            composerFocused = true
+            if canFocusComposer { composerFocused = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .newChat)) { _ in
-            composerFocused = true
+            if canFocusComposer { composerFocused = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusComposer)) { _ in
-            composerFocused = true
+            if canFocusComposer { composerFocused = true }
         }
         .task {
             // AppKit gives launch focus to the sidebar search field, which
             // drops it after 0.3 s; then the composer takes it, so typing
-            // works as soon as the window shows.
+            // works as soon as the window shows — unless a Settings/Models route
+            // is active over the chat.
             try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, canFocusComposer else { return }
             composerFocused = true
         }
         .onChange(of: chat.streamingMessageID) {
@@ -135,6 +149,10 @@ struct ChatScreen: View {
         let lastMessageID = messages.last?.id
         let streamingMessageID = chat.streamingMessageID
         let isAnyStreaming = chat.isStreaming
+        let isStreamingThisConversation = isAnyStreaming
+            && Self.isStreamingConversation(
+                streamingMessageID: streamingMessageID,
+                messageIDs: messages.map(\.id))
         let isInThinkPhase = chat.isInThinkPhase
         return ScrollViewReader { proxy in
             ScrollView {
@@ -149,7 +167,7 @@ struct ChatScreen: View {
                             isInThinkPhase: isStreamingThis && isInThinkPhase,
                             // Only the regenerate button reads it; giving it to
                             // every row re-rendered them all at send and finish.
-                            isAnyStreaming: onRegenerate != nil && isAnyStreaming,
+                            isAnyStreaming: onRegenerate != nil && (isAnyStreaming || chat.isSelectedModelPreparing),
                             modelDisplayName: message.modelID.map { chat.modelDisplayName(for: $0) },
                             onRegenerate: onRegenerate)
                             .equatable()
@@ -178,7 +196,7 @@ struct ChatScreen: View {
                 }
                 if old.contentHeight != new.contentHeight,
                    old.atBottom || new.atBottom
-                    || (isAnyStreaming && !userPausedAutoScroll) {
+                    || (isStreamingThisConversation && !userPausedAutoScroll) {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
@@ -209,7 +227,7 @@ struct ChatScreen: View {
                 }
             }
             .onChange(of: transcriptFingerprint(for: messages)) {
-                if atBottom || (chat.isStreaming && !userPausedAutoScroll) {
+                if atBottom || (isStreamingThisConversation && !userPausedAutoScroll) {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
@@ -217,7 +235,8 @@ struct ChatScreen: View {
                 ScrollPinner(
                     proxy: proxy,
                     atBottom: atBottom,
-                    userPausedAutoScroll: userPausedAutoScroll)
+                    userPausedAutoScroll: userPausedAutoScroll,
+                    isStreamingThisConversation: isStreamingThisConversation)
             }
             .overlay(alignment: .bottom) {
                 if !atBottom {
@@ -293,12 +312,14 @@ private struct ScrollPinner: View {
     let proxy: ScrollViewProxy
     let atBottom: Bool
     let userPausedAutoScroll: Bool
+    let isStreamingThisConversation: Bool
 
     var body: some View {
         Color.clear
             .accessibilityHidden(true)
             .onChange(of: chat.transcriptRevision) {
-                if atBottom || (chat.isStreaming && !userPausedAutoScroll) {
+                guard isStreamingThisConversation else { return }
+                if atBottom || !userPausedAutoScroll {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
@@ -307,25 +328,36 @@ private struct ScrollPinner: View {
 
 /// Warns BEFORE sending when the selected engine cannot serve yet — on a
 /// fresh Mac, macOS may still be downloading the Apple Intelligence model.
-/// Re-checks periodically so the notice clears on its own once ready.
-private struct EngineReadinessNotice: View {
+/// Re-checks periodically only when Apple Intelligence (or the preview hook)
+/// is active so local MLX sessions do not tick every 10 seconds.
+struct EngineReadinessNotice: View {
     let selectedModelID: String
 
+    static func shouldTickReadinessNotice(
+        selectedModelID: String,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        selectedModelID == appleIntelligenceEngineID
+            || arguments.contains("--fake-ai-preparing")
+    }
+
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 10)) { _ in
-            if let message = notice {
-                HStack(spacing: 8) {
-                    Image(systemName: "hourglass")
-                        .foregroundStyle(Color.iconOrange)
-                    Text(message)
-                        .font(Studio.sans(12.5))
-                        .foregroundStyle(.secondary)
+        if Self.shouldTickReadinessNotice(selectedModelID: selectedModelID) {
+            TimelineView(.periodic(from: .now, by: 10)) { _ in
+                if let message = notice {
+                    HStack(spacing: 8) {
+                        Image(systemName: "hourglass")
+                            .foregroundStyle(Color.iconOrange)
+                        Text(message)
+                            .font(Studio.sans(12.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(Color.cardFill))
+                    .overlay(Capsule().strokeBorder(Color.cardStroke, lineWidth: 1))
+                    .padding(.bottom, 6)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(Color.cardFill))
-                .overlay(Capsule().strokeBorder(Color.cardStroke, lineWidth: 1))
-                .padding(.bottom, 6)
             }
         }
     }

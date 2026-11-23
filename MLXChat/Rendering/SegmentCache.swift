@@ -11,37 +11,18 @@ final class SegmentCache {
         var blocks: [RenderBlock]
     }
 
-    private var entries: [UUID: Entry] = [:]
-    private var order: [UUID] = []
-    private let capacity: Int
+    private var cache: TwoGenerationCache<UUID, Entry>
 
     init(capacity: Int = 256) {
-        self.capacity = capacity
+        self.cache = TwoGenerationCache(capacity: capacity)
     }
 
     func segments(for id: UUID, content: String) -> [RenderBlock] {
-        if let cached = entries[id], cached.content == content {
-            touch(id)
+        if let cached = cache.value(forKey: id), cached.content == content {
             return cached.blocks
         }
         let blocks = MessageSegmenter.segment(content)
-        entries[id] = Entry(content: content, blocks: blocks)
-        touch(id)
-        evictIfNeeded()
+        cache.insert(Entry(content: content, blocks: blocks), forKey: id)
         return blocks
-    }
-
-    private func touch(_ id: UUID) {
-        if let index = order.firstIndex(of: id) {
-            order.remove(at: index)
-        }
-        order.append(id)
-    }
-
-    private func evictIfNeeded() {
-        while order.count > capacity {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
     }
 }

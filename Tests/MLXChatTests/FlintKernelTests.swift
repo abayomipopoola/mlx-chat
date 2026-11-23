@@ -377,17 +377,34 @@ import TurboFieldfare
         #expect(lfmManifest.arch.fullAttentionLayerMask.contains(3))
     }
 
-    @Test func flintFP16InfinityClampBitPatternMatchesGreatestFiniteMagnitude() {
-        func clampBits(_ bits: UInt16) -> UInt16 {
-            (bits & 0x7FFF) == 0x7C00 ? ((bits & 0x8000) | 0x7BFF) : bits
+    @Test func flintFP16InfinityClampBitPatternMatchesGreatestFiniteMagnitude() throws {
+        let inputBits: [UInt16] = [
+            Float16.infinity.bitPattern,
+            (-Float16.infinity).bitPattern,
+            Float16(42.5).bitPattern,
+            Float16(-0.125).bitPattern,
+            Float16.nan.bitPattern,
+        ]
+        let context = try MetalContext()
+        let pipeline = try context.pipeline("flint_clamp_inf_f16", privateModule: "flint")
+        let valuesBuffer = try Self.buffer(context.device, inputBits)
+        try Self.run(context) { encoder in
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(valuesBuffer, offset: 0, index: 0)
+            var count = UInt32(inputBits.count)
+            encoder.setBytes(&count, length: 4, index: 1)
+            encoder.dispatchThreads(
+                MTLSize(width: inputBits.count, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: inputBits.count, height: 1, depth: 1))
         }
-        #expect(Float16(bitPattern: clampBits(Float16.infinity.bitPattern))
-                == Float16.greatestFiniteMagnitude)
-        #expect(Float16(bitPattern: clampBits((-Float16.infinity).bitPattern))
-                == -Float16.greatestFiniteMagnitude)
-        #expect(Float16(bitPattern: clampBits(Float16(42.5).bitPattern)) == Float16(42.5))
-        #expect(Float16(bitPattern: clampBits(Float16(-0.125).bitPattern)) == Float16(-0.125))
-        #expect(Float16(bitPattern: clampBits(Float16.nan.bitPattern)).isNaN)
+        let clamped = Array(UnsafeBufferPointer(
+            start: valuesBuffer.contents().assumingMemoryBound(to: UInt16.self),
+            count: inputBits.count))
+        #expect(Float16(bitPattern: clamped[0]) == Float16.greatestFiniteMagnitude)
+        #expect(Float16(bitPattern: clamped[1]) == -Float16.greatestFiniteMagnitude)
+        #expect(Float16(bitPattern: clamped[2]) == Float16(42.5))
+        #expect(Float16(bitPattern: clamped[3]) == Float16(-0.125))
+        #expect(Float16(bitPattern: clamped[4]).isNaN)
     }
 
     @Test func gpuRouterMatchesReferenceSelection() throws {

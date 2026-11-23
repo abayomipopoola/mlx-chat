@@ -14,12 +14,20 @@ struct ArtifactNavigationPolicy {
 
     static func decision(for url: URL?, isLinkActivated: Bool) -> ArtifactNavigationDecision {
         if isLinkActivated, let url {
-            guard let scheme = url.scheme?.lowercased(),
-                  browserSchemes.contains(scheme)
-            else {
+            if let scheme = url.scheme?.lowercased() {
+                if scheme == "about",
+                   let fragment = url.fragment, !fragment.isEmpty {
+                    return .allowInWebView
+                }
+                if browserSchemes.contains(scheme) {
+                    return .openInBrowser
+                }
                 return .cancel
             }
-            return .openInBrowser
+            if url.path.isEmpty, let fragment = url.fragment, !fragment.isEmpty {
+                return .allowInWebView
+            }
+            return .cancel
         }
 
         guard let url else {
